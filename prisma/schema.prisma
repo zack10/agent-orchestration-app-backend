@@ -1,0 +1,65 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Agent {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  config      Json?
+  skills      Skill[]  @relation("AgentSkills")
+  tasks       Task[]
+  resources   MCPResource[] @relation("AgentResources")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  sentMessages     Message[] @relation("SentMessages")
+  receivedMessages Message[] @relation("ReceivedMessages")
+}
+
+model Skill {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  logic       String
+  agents      Agent[]  @relation("AgentSkills")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Task {
+  id        String   @id @default(uuid())
+  payload   Json
+  status    String
+  agent     Agent    @relation(fields: [agentId], references: [id])
+  agentId   String
+  result    Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Message {
+  id         String   @id @default(uuid())
+  content    Json
+  sender     Agent    @relation("SentMessages", fields: [senderId], references: [id])
+  senderId   String
+  receiver   Agent    @relation("ReceivedMessages", fields: [receiverId], references: [id])
+  receiverId String
+  createdAt  DateTime @default(now())
+}
+
+model MCPResource {
+  id          String   @id @default(uuid())
+  type        String
+  name        String
+  config      Json
+  agents      Agent[]  @relation("AgentResources")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
