@@ -1,4 +1,11 @@
-export type MessageType = 'AGENT_MESSAGE' | 'TASK_UPDATE' | 'RESOURCE_REQUEST';
+export type MessageType =
+  | 'AGENT_MESSAGE'
+  | 'TASK_UPDATE'
+  | 'RESOURCE_REQUEST'
+  | 'WORKITEM_STATUS'
+  | 'CONTRACT_PROPOSAL'
+  | 'CONTRACT_ACCEPTED'
+  | 'CONTRACT_REJECTED';
 
 export interface MessageMetadata {
   timestamp: string;

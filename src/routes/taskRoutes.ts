@@ -4,11 +4,13 @@ import {
   getTasks,
   getTaskById,
 } from '../controllers/taskController';
+import { validate } from '../middleware/validate';
+import { createTaskSchema, idParamSchema } from '../schemas';
 
 const router = Router();
 
-router.post('/', createTask);
+router.post('/', validate(createTaskSchema), createTask);
 router.get('/', getTasks);
-router.get('/:id', getTaskById);
+router.get('/:id', validate(idParamSchema), getTaskById);
 
 export default router;
