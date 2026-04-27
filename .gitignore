@@ -30,3 +30,13 @@ yarn-error.log*
 
 # Prisma
 /prisma/migrations/
+
+.junie/
+
+generated-code/
+.aider*
+.obsidian/
+
+copilot/
+
+opencode.json

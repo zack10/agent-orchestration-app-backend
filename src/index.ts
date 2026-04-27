@@ -1,11 +1,16 @@
 import cors from 'cors';
 import express, { Request, Response } from 'express';
+import dotenv from 'dotenv';
 import prisma from './db';
 import { errorHandler } from './middleware/errorHandler';
 import agentRoutes from './routes/agentRoutes';
+import projectRoutes from './routes/projectRoutes';
 import skillRoutes from './routes/skillRoutes';
 import taskRoutes from './routes/taskRoutes';
+import llmRoutes from './routes/llmRoutes';
 import rabbitMQService from './services/rabbitMQService';
+
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -30,8 +35,10 @@ app.get('/health', async (_req: Request, res: Response) => {
 });
 
 app.use('/api/agents', agentRoutes);
+app.use('/api/projects', projectRoutes);
 app.use('/api/skills', skillRoutes);
 app.use('/api/tasks', taskRoutes);
+app.use('/api/llm', llmRoutes);
 
 app.get('/', (_req: Request, res: Response) => {
   res.send('Agent Orchestration API is running');
