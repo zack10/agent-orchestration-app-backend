@@ -4,9 +4,9 @@ import { AppError } from '../errors/AppError';
 import { asyncHandler } from '../middleware/asyncHandler';
 
 export const createAgent = asyncHandler(async (req: Request, res: Response) => {
-  const { name, description, config } = req.body;
+  const { name, description, config, projectId } = req.body;
   const agent = await prisma.agent.create({
-    data: { name, description, config },
+    data: { name, description, config, projectId },
   });
   res.status(201).json(agent);
 });
@@ -32,10 +32,10 @@ export const getAgentById = asyncHandler(async (req: Request, res: Response) => 
 
 export const updateAgent = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { name, description, config } = req.body;
+  const { name, description, config, projectId } = req.body;
   const agent = await prisma.agent.update({
     where: { id },
-    data: { name, description, config },
+    data: { name, description, config, projectId },
   });
   res.status(200).json(agent);
 });
