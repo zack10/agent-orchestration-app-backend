@@ -1,14 +1,17 @@
-import { z } from 'zod';
+import { z } from "zod";
 
 const uuid = z.string().uuid();
 
 // Agent schemas
 export const createAgentSchema = z.object({
   body: z.object({
-    name: z.string().min(1, 'Name is required'),
+    name: z.string().min(1, "Name is required"),
     description: z.string().optional(),
     config: z.record(z.unknown()).optional(),
     projectId: uuid.optional(),
+    provider: z.enum(["gemini", "openai", "anthropic"]).optional(),
+    model: z.string().min(1).optional(),
+    baseInstructions: z.string().max(20_000).optional(),
   }),
 });
 
@@ -19,15 +22,18 @@ export const updateAgentSchema = z.object({
     description: z.string().optional(),
     config: z.record(z.unknown()).optional(),
     projectId: uuid.optional(),
+    provider: z.enum(["gemini", "openai", "anthropic"]).optional(),
+    model: z.string().min(1).optional(),
+    baseInstructions: z.string().max(20_000).optional(),
   }),
 });
 
 // Skill schemas
 export const createSkillSchema = z.object({
   body: z.object({
-    name: z.string().min(1, 'Name is required'),
+    name: z.string().min(1, "Name is required"),
     description: z.string().optional(),
-    logic: z.string().min(1, 'Logic is required'),
+    logic: z.string().min(1, "Logic is required"),
   }),
 });
 
@@ -49,16 +55,32 @@ export const assignSkillSchema = z.object({
 
 // Task schemas
 export const createTaskSchema = z.object({
+  headers: z
+    .object({
+      "idempotency-key": z.string().min(8).max(200).optional(),
+    })
+    .passthrough(),
   body: z.object({
     agentId: uuid,
     payload: z.record(z.unknown()),
   }),
 });
 
+export const discoverProviderSchema = z.object({
+  body: z.object({
+    provider: z.enum(["gemini", "openai", "anthropic"]),
+    apiKey: z.string().min(1),
+  }),
+});
+
+export const providerQuerySchema = z.object({
+  query: z.object({ provider: z.enum(["gemini", "openai", "anthropic"]) }),
+});
+
 // Project schemas
 export const createProjectSchema = z.object({
   body: z.object({
-    name: z.string().min(1, 'Name is required'),
+    name: z.string().min(1, "Name is required"),
     description: z.string().optional(),
     techStack: z.string().optional(),
     architectureDecisions: z.string().optional(),
@@ -79,13 +101,13 @@ export const updateProjectSchema = z.object({
 
 // Message schemas
 export const messageTypeSchema = z.enum([
-  'AGENT_MESSAGE',
-  'TASK_UPDATE',
-  'RESOURCE_REQUEST',
-  'WORKITEM_STATUS',
-  'CONTRACT_PROPOSAL',
-  'CONTRACT_ACCEPTED',
-  'CONTRACT_REJECTED',
+  "AGENT_MESSAGE",
+  "TASK_UPDATE",
+  "RESOURCE_REQUEST",
+  "WORKITEM_STATUS",
+  "CONTRACT_PROPOSAL",
+  "CONTRACT_ACCEPTED",
+  "CONTRACT_REJECTED",
 ]);
 
 export const messageMetadataSchema = z.object({

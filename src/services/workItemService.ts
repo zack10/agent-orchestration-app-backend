@@ -1,13 +1,6 @@
-import prisma from '../db';
-import { WorkItemStatus, canTransitionWorkItemStatus } from '../types/workItem';
-
-const workItems = () => {
-  const delegate = (prisma as any).workItem;
-  if (!delegate) {
-    throw new Error('Prisma client is missing WorkItem delegate. Regenerate Prisma client after updating schema.prisma.');
-  }
-  return delegate as any;
-};
+import { Prisma } from "@prisma/client";
+import prisma from "../db";
+import { WorkItemStatus, canTransitionWorkItemStatus } from "../types/workItem";
 
 export const claimWorkItemLock = async (params: {
   workItemId: string;
@@ -18,7 +11,7 @@ export const claimWorkItemLock = async (params: {
   const lockSeconds = params.lockSeconds ?? 300;
   const lockUntil = new Date(now.getTime() + lockSeconds * 1000);
 
-  const res = await workItems().updateMany({
+  const res = await prisma.workItem.updateMany({
     where: {
       id: params.workItemId,
       OR: [{ lockUntil: null }, { lockUntil: { lt: now } }],
@@ -36,7 +29,7 @@ export const releaseWorkItemLock = async (params: {
   workItemId: string;
   lockOwner: string;
 }): Promise<boolean> => {
-  const res = await workItems().updateMany({
+  const res = await prisma.workItem.updateMany({
     where: {
       id: params.workItemId,
       lockOwner: params.lockOwner,
@@ -55,9 +48,9 @@ export const transitionWorkItemStatus = async (params: {
   from?: WorkItemStatus;
   to: WorkItemStatus;
   lastError?: string | null;
-  metadata?: any;
+  metadata?: Prisma.InputJsonValue;
 }): Promise<boolean> => {
-  const existing = await workItems().findUnique({
+  const existing = await prisma.workItem.findUnique({
     where: { id: params.workItemId },
     select: { status: true },
   });
@@ -67,8 +60,8 @@ export const transitionWorkItemStatus = async (params: {
   const from = params.from ?? (existing.status as WorkItemStatus);
   if (!canTransitionWorkItemStatus(from, params.to)) return false;
 
-  await workItems().update({
-    where: { id: params.workItemId },
+  const result = await prisma.workItem.updateMany({
+    where: { id: params.workItemId, status: from },
     data: {
       status: params.to,
       lastError: params.lastError ?? undefined,
@@ -76,5 +69,5 @@ export const transitionWorkItemStatus = async (params: {
     },
   });
 
-  return true;
+  return result.count === 1;
 };

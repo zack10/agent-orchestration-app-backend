@@ -1,27 +1,31 @@
-import { Task } from '@prisma/client';
+import { Agent, Project, Task } from "@prisma/client";
+
+type PromptProject = Pick<
+  Project,
+  "name" | "techStack" | "architectureDecisions" | "contextData"
+>;
+type PromptAgent = Pick<Agent, "name" | "baseInstructions">;
 
 /**
  * Utility to assemble a comprehensive prompt for the LLM.
  * Aggregates agent identity, project context, and task requirements.
  */
 export const buildAgentPrompt = (params: {
-  project: any;
-  agent: any;
+  project: PromptProject;
+  agent: PromptAgent;
   task: Task;
 }) => {
-  const { project: projectRaw, agent: agentRaw, task } = params;
-  const project = projectRaw as any;
-  const agent = agentRaw as any;
+  const { project, agent, task } = params;
 
   const systemPrompt = `
 You are an AI Agent named "${agent.name}".
 Your role and base instructions:
-${agent.baseInstructions || 'You are a professional software engineer.'}
+${agent.baseInstructions || "You are a professional software engineer."}
 
 PROJECT CONTEXT:
 Project Name: ${project.name}
-Tech Stack: ${project.techStack || 'Not specified'}
-Architecture Decisions: ${project.architectureDecisions || 'None recorded'}
+Tech Stack: ${project.techStack || "Not specified"}
+Architecture Decisions: ${project.architectureDecisions || "None recorded"}
 
 CURRENT PROJECT STATE:
 ${JSON.stringify(project.contextData, null, 2)}
@@ -37,16 +41,13 @@ TASK ASSIGNMENT:
 Task ID: ${task.id}
 Payload: ${JSON.stringify(task.payload, null, 2)}
 
-PLEASE PROVIDE YOUR RESPONSE IN THE FOLLOWING FORMAT:
-1. THINKING: Your reasoning process.
-2. ACTIONS: 
-   If you generate code, use this format for each file:
-   FILE: path/to/file.ext
-   \`\`\`language
-   // code here
-   \`\`\`
-3. CONTEXT_UPDATES: Any updates that should be written back to the Shared Project Context (valid JSON).
-4. STATUS: The outcome of the task (COMPLETED/FAILED).
+Return one JSON object with this exact shape and no markdown wrapper:
+{
+  "summary": "brief description of work performed; do not include private reasoning",
+  "actions": "FILE: path/to/file.ext\\n\`\`\`language\\ncode\\n\`\`\` or an empty string",
+  "contextUpdates": {},
+  "status": "COMPLETED or FAILED"
+}
 `;
 
   return {

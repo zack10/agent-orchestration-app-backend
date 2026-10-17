@@ -1,4 +1,4 @@
-import type { AgentRole } from '../types/workItem';
+import type { AgentRole } from "../types/workItem";
 
 export const roleWorkRoutingKey = (role: AgentRole) => `role.${role}.work`;
 

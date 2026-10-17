@@ -1,98 +1,147 @@
-import prisma from '../db';
-import { writeGeneratedCode } from '../utils/codeWriter';
-import { LLMService } from './llm/LLMService';
-import { parseAgentOutput } from '../utils/llmUtils';
-import { getProjectContext, updateProjectContext } from './projectService';
-import { buildAgentPrompt } from './promptBuilder';
-import { decrypt } from '../utils/crypto';
+import {
+  Agent,
+  MCPResource,
+  Prisma,
+  Project,
+  Skill,
+  Task,
+} from "@prisma/client";
+import { z } from "zod";
+import { config as appConfig } from "../config";
+import prisma from "../db";
+import { writeGeneratedCode } from "../utils/codeWriter";
+import { decrypt } from "../utils/crypto";
+import { parseAgentOutput } from "../utils/llmUtils";
+import { describeError } from "../utils/safeError";
+import { LLMService } from "./llm/LLMService";
+import { getProjectContext, updateProjectContext } from "./projectService";
+import { buildAgentPrompt } from "./promptBuilder";
+
+const AgentConfigSchema = z
+  .object({
+    apiKey: z.string().optional(),
+  })
+  .passthrough();
+
+export interface AgentWithRelations extends Agent {
+  skills: Skill[];
+  resources: MCPResource[];
+}
+
+export interface ProjectWithRelations extends Project {
+  agents: Agent[];
+}
+
+export interface TaskWithRelations extends Task {
+  agent: AgentWithRelations;
+  project: ProjectWithRelations | null;
+}
 
 const llmService = new LLMService();
 
+const applyContextUpdates = async (
+  contextUpdates: string | undefined,
+  projectId: string | null,
+) => {
+  if (!contextUpdates || !projectId) return;
+  try {
+    const updates = JSON.parse(contextUpdates);
+    await updateProjectContext(projectId, {
+      contextData: updates as Prisma.JsonObject,
+    });
+  } catch (error) {
+    console.warn(`Failed to apply context updates: ${describeError(error)}`);
+  }
+};
+
 export const runAgent = async (taskId: string) => {
-  // ... (lines 20-65) fetch task, mark status, build prompt, call LLM, parse output
-  const task = await (prisma.task as any).findUnique({
+  const claim = await prisma.task.updateMany({
+    where: { id: taskId, status: "PENDING" },
+    data: {
+      status: "IN_PROGRESS",
+      startedAt: new Date(),
+      attemptCount: { increment: 1 },
+      lastError: null,
+    },
+  });
+  if (claim.count === 0) return false;
+
+  const task = (await prisma.task.findUnique({
     where: { id: taskId },
     include: {
       agent: {
         include: { skills: true, resources: true },
       },
       project: {
-        include: { agents: true }
-      }
+        include: { agents: true },
+      },
     },
-  });
+  })) as TaskWithRelations | null;
 
-  if (!task || !task.agent) return;
-
-  await prisma.task.update({ where: { id: taskId }, data: { status: 'IN_PROGRESS' } });
+  if (!task?.agent)
+    throw new Error(`Claimed task ${taskId} could not be loaded`);
 
   try {
     const { agent, project } = task;
-    const context = project || await getProjectContext(agent.projectId || '') || { name: 'Unknown Project', contextData: {} };
+    const context = project ||
+      (await getProjectContext(agent.projectId || "")) || {
+        name: "Unknown Project",
+        techStack: null,
+        architectureDecisions: null,
+        contextData: {},
+      };
 
-    const prompt = buildAgentPrompt({ project: context as any, agent, task });
-    
+    const prompt = buildAgentPrompt({ project: context, agent, task });
+
     // Extract API key from config if available (encrypted)
     let apiKey: string | undefined;
-    const config = agent.config as any;
+    const config = agent.config ? AgentConfigSchema.parse(agent.config) : null;
+
     if (config?.apiKey) {
-      try {
-        // Try to decrypt. If it's not encrypted (no colons), it will throw, 
-        // in which case we might fallback to raw value or environment.
-        if (config.apiKey.includes(':')) {
-          apiKey = decrypt(config.apiKey);
-        } else {
-          apiKey = config.apiKey;
-        }
-      } catch (e) {
-        console.warn(`Failed to decrypt API key for agent ${agent.name}, using as-is or falling back to env.`);
-        apiKey = config.apiKey;
-      }
+      apiKey = decrypt(config.apiKey);
     }
 
     const rawOutput = await llmService.generateContent(
-      (agent as any).model || 'gemini-flash-latest', 
+      agent.provider || "gemini",
+      agent.model || "gemini-flash-latest",
       prompt,
-      apiKey
+      apiKey,
     );
     const parsed = parseAgentOutput(rawOutput);
 
     // Write generated code if any
     let writtenFiles: string[] = [];
     if (parsed.actions) {
-      writtenFiles = writeGeneratedCode(parsed.actions, context.name);
+      writtenFiles = writeGeneratedCode(
+        parsed.actions,
+        context.name || "Unknown Project",
+      );
       if (writtenFiles.length > 0) {
-        console.log(`Agent ${agent.name} wrote ${writtenFiles.length} files to generated-code/.`);
+        console.log(
+          `Agent ${agent.name} wrote ${writtenFiles.length} files to generated-code/.`,
+        );
       }
     }
 
-    if (parsed.contextUpdates && task.projectId) {
-      try {
-        const updates = JSON.parse(parsed.contextUpdates);
-        await updateProjectContext(task.projectId, { contextData: updates });
-      } catch (e) {
-        console.warn('Invalid context updates from agent:', parsed.contextUpdates);
-      }
-    }
+    await applyContextUpdates(parsed.contextUpdates, task.projectId);
 
     await prisma.task.update({
       where: { id: taskId },
       data: {
-        status: parsed.status === 'COMPLETED' ? 'COMPLETED' : 'FAILED',
+        status: parsed.status === "COMPLETED" ? "COMPLETED" : "FAILED",
+        completedAt: new Date(),
         result: {
           thinking: parsed.thinking,
           actions: parsed.actions,
           writtenFiles,
-          raw: parsed.raw,
-        },
+          ...(appConfig.storeRawLlmOutput ? { raw: parsed.raw } : {}),
+        } as Prisma.JsonObject,
       },
     });
-
-  } catch (error: any) {
-    console.error(`Error running agent execution loop:`, error);
-    await prisma.task.update({
-      where: { id: taskId },
-      data: { status: 'FAILED', result: { error: error.message } },
-    });
+    return true;
+  } catch (error: unknown) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error(`Error running agent execution loop: ${describeError(err)}`);
+    throw err;
   }
 };

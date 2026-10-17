@@ -1,11 +1,11 @@
 export type MessageType =
-  | 'AGENT_MESSAGE'
-  | 'TASK_UPDATE'
-  | 'RESOURCE_REQUEST'
-  | 'WORKITEM_STATUS'
-  | 'CONTRACT_PROPOSAL'
-  | 'CONTRACT_ACCEPTED'
-  | 'CONTRACT_REJECTED';
+  | "AGENT_MESSAGE"
+  | "TASK_UPDATE"
+  | "RESOURCE_REQUEST"
+  | "WORKITEM_STATUS"
+  | "CONTRACT_PROPOSAL"
+  | "CONTRACT_ACCEPTED"
+  | "CONTRACT_REJECTED";
 
 export interface MessageMetadata {
   timestamp: string;
@@ -18,6 +18,6 @@ export interface AgentMessagePayload {
   type: MessageType;
   senderId: string;
   receiverId: string | null;
-  payload: any;
+  payload: unknown;
   metadata: MessageMetadata;
 }

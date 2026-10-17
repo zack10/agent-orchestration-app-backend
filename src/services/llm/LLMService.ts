@@ -1,58 +1,60 @@
-import dotenv from 'dotenv';
-import { AnthropicProvider } from './providers/AnthropicProvider';
-import { GeminiProvider } from './providers/GeminiProvider';
-import { OpenAIProvider } from './providers/OpenAIProvider';
-import { LLMProvider, UsageStats } from './types';
+import dotenv from "dotenv";
+import { AnthropicProvider } from "./providers/AnthropicProvider";
+import { GeminiProvider } from "./providers/GeminiProvider";
+import { OpenAIProvider } from "./providers/OpenAIProvider";
+import { LLMProvider, Model, UsageStats } from "./types";
 
-dotenv.config()
+export type ProviderKey = "gemini" | "openai" | "anthropic";
+
+dotenv.config();
 
 /**
  * Main LLM Service handling provider discovery and routing
  */
 export class LLMService {
-  private providers: Map<string, LLMProvider> = new Map()
+  private readonly providers: Map<string, LLMProvider> = new Map();
 
   constructor() {
     // Register default providers
-    this.providers.set('gemini', new GeminiProvider())
-    this.providers.set('openai', new OpenAIProvider())
-    this.providers.set('anthropic', new AnthropicProvider())
+    this.providers.set("gemini", new GeminiProvider());
+    this.providers.set("openai", new OpenAIProvider());
+    this.providers.set("anthropic", new AnthropicProvider());
   }
 
   /**
    * List all available models for a specific provider
    */
-  async listModels(providerKey: string, apiKey?: string): Promise<any[]> {
-    const provider = this.providers.get(providerKey)
+  async listModels(providerKey: string, apiKey?: string): Promise<Model[]> {
+    const provider = this.providers.get(providerKey);
     if (!provider) {
-      throw new Error(`Provider ${providerKey} not found`)
+      throw new Error(`Provider ${providerKey} not found`);
     }
-    return provider.listModels(apiKey)
+    return provider.listModels(apiKey);
   }
 
   /**
    * Generate content using specified model
    */
-  async generateContent(model: string, prompt: { system?: string; user: string }, apiKey?: string): Promise<string> {
-    // In MVP, try to find provider matching model name
-    const providerKeys = Array.from(this.providers.keys())
-    const matchingKey = providerKeys.find(key => model.toLowerCase().includes(key))
-
-    if (!matchingKey) {
-      throw new Error(`No provider found for model: ${model}`)
-    }
-
-    const provider = this.providers.get(matchingKey)
+  async generateContent(
+    providerKey: string,
+    model: string,
+    prompt: { system?: string; user: string },
+    apiKey?: string,
+  ): Promise<string> {
+    const provider = this.providers.get(providerKey);
     if (!provider) {
-      throw new Error(`Provider ${matchingKey} not found`)
+      throw new Error(`Provider ${providerKey} not found`);
     }
-    return provider.generateContent(model, prompt, apiKey)
+    return provider.generateContent(model, prompt, apiKey);
   }
 
   /**
    * Test a provider key and discover available models/quotas
    */
-  async discover(providerKey: string, apiKey: string): Promise<{ models: any[]; usage: UsageStats }> {
+  async discover(
+    providerKey: string,
+    apiKey: string,
+  ): Promise<{ models: Model[]; usage: UsageStats }> {
     const provider = this.providers.get(providerKey);
     if (!provider) {
       throw new Error(`Provider ${providerKey} not found`);
@@ -60,7 +62,7 @@ export class LLMService {
 
     const [models, usage] = await Promise.all([
       provider.listModels(apiKey),
-      provider.getUsage(apiKey)
+      provider.getUsage(apiKey),
     ]);
 
     return { models, usage };
@@ -70,10 +72,10 @@ export class LLMService {
    * Get usage statistics for a provider
    */
   async getUsage(providerKey: string, apiKey?: string): Promise<UsageStats> {
-    const provider = this.providers.get(providerKey)
+    const provider = this.providers.get(providerKey);
     if (!provider) {
-      throw new Error(`Provider ${providerKey} not found`)
+      throw new Error(`Provider ${providerKey} not found`);
     }
-    return provider.getUsage(apiKey)
+    return provider.getUsage(apiKey);
   }
 }
