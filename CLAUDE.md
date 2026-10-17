@@ -45,7 +45,8 @@ There are two independent async pipelines:
 - Two human approval gates: plan approval and publish approval (`POST /api/executions/:id/approvals/plan|publish`).
 - The run step executes a LangGraph state graph (`services/agentGraph/executionGraph.ts`): load_context → inspect_repo → plan_change → implement_change → enforce_policy → verify_change (→ analyze_failure loop) → review_diff → create_diff_artifact / block_execution. `diffReview.ts` rejects unsafe diffs (e.g. added secrets).
 - Work happens in a Docker-isolated clone under `WORKSPACE_ROOT` (`workspaceService`, shells out to `docker`/`git`); verification runs the repository's configured npm scripts (`Repository.verificationConfig`). Docker Desktop must be running.
-- Publishing uses a GitHub App (`integrations/githubApp.ts`) to push and open a **draft** PR only; Trello is notified via `integrations/trelloAdapter.ts`.
+- Publishing uses a GitHub App (`integrations/githubApp.ts`) to push and open a **draft** PR only.
+- Issue trackers are pluggable: each implements `IssueTrackerAdapter` (`integrations/types.ts`: fetch eligible items, comment) and is registered in `integrations/trackerRegistry.ts`. Trello (`integrations/trelloAdapter.ts`) is the only adapter. Tracker-neutral logic (WorkItem upsert, execution creation, status comments) lives in `services/ingestionService.ts`; `services/integrationPollingService.ts` polls every registered tracker type. Adapters must keep their `revisionHash` formula stable (it is part of the execution idempotency key). Source control is still GitHub-only.
 - Integration credentials are encrypted at rest (`integrationConfigService`, `utils/crypto`, needs 64-hex `ENCRYPTION_KEY`) and redacted in API responses; same for agent `config.apiKey`.
 
 ### Other
@@ -56,6 +57,10 @@ There are two independent async pipelines:
 ## Environment
 
 - `.env.local` → Docker Postgres + RabbitMQ at `localhost:15673` (compose remaps AMQP to avoid Windows port conflicts). `.env.example` is the template.
+- Auth fails closed: `/api/*` needs `API_AUTH_TOKEN` unless `AUTH_DISABLED=true` (local only; refused in production). Empty `CORS_ORIGINS` blocks browsers.
+- Approval requests must include the pending approval's `snapshotHash`.
+- Consumers (`rabbitMQService.subscribe`) retry via `<queue>.retry` and dead-letter to `<queue>.dead`; throw `NonRetryableError` (`utils/safeError.ts`) for failures that will not succeed on retry. Log errors with `describeError()`, never raw axios errors (they carry keys/tokens).
+- Never `prisma db push` against a migrated DB; use migrations.
 - `.env.cloud` → Prisma Accelerate.
 - Prisma migrations in `prisma/migrations/` are meant to be committed.
 - `docs/` holds planning and reference material (`plans/`, `specs/`, `testing/`, `guides/`, `history/`); it describes intent and past phases, not necessarily current behaviour. `AUDIT.md` at the root is the live fix tracker.

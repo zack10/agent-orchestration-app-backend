@@ -1,13 +1,13 @@
 import { Request, Response } from "express";
 import { config } from "../config";
 import prisma from "../db";
-import { syncTrelloConnection } from "../integrations/trelloAdapter";
 import { asyncHandler } from "../middleware/asyncHandler";
 import {
   createExecution,
   decideApproval,
   submitPlan,
 } from "../services/executionService";
+import { syncIntegrationConnection } from "../services/ingestionService";
 import {
   redactIntegration,
   sealIntegrationConfig,
@@ -73,7 +73,7 @@ export const listIntegrations = asyncHandler(
 );
 export const syncIntegration = asyncHandler(
   async (req: Request, res: Response) => {
-    res.json(await syncTrelloConnection(req.params.id));
+    res.json(await syncIntegrationConnection(req.params.id));
   },
 );
 export const listWorkItems = asyncHandler(

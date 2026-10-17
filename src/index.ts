@@ -26,9 +26,9 @@ import { startOutbox, stopOutbox } from "./services/outboxService";
 import rabbitMQService from "./services/rabbitMQService";
 import taskQueueService from "./services/taskQueueService";
 import {
-  startTrelloPolling,
-  stopTrelloPolling,
-} from "./services/trelloPollingService";
+  startIntegrationPolling,
+  stopIntegrationPolling,
+} from "./services/integrationPollingService";
 
 dotenv.config();
 
@@ -92,7 +92,7 @@ async function start() {
     await startMessageRecovery();
     await startExecutionWorkers();
     await startOutbox();
-    await startTrelloPolling();
+    await startIntegrationPolling();
   } catch (err) {
     if (config.nodeEnv === "production") throw err;
     console.warn(
@@ -109,7 +109,7 @@ async function start() {
     taskQueueService.stop();
     stopMessageRecovery();
     stopOutbox();
-    stopTrelloPolling();
+    stopIntegrationPolling();
     stopExecutionWorkers();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));

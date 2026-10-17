@@ -21,8 +21,10 @@ export const config = {
   apiAuthActor: process.env.API_AUTH_ACTOR ?? "api-token:default",
   artifactRoot: process.env.ARTIFACT_ROOT ?? "artifacts",
   workspaceRoot: process.env.WORKSPACE_ROOT ?? "workspaces",
-  trelloPollIntervalMs: parsePositiveInt(
-    process.env.TRELLO_POLL_INTERVAL_MS,
+  // TRELLO_POLL_INTERVAL_MS is the pre-adapter name, still honoured.
+  integrationPollIntervalMs: parsePositiveInt(
+    process.env.INTEGRATION_POLL_INTERVAL_MS ??
+      process.env.TRELLO_POLL_INTERVAL_MS,
     30_000,
   ),
   corsOrigins: parseList(process.env.CORS_ORIGINS),

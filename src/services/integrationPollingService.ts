@@ -1,25 +1,29 @@
 import { config } from "../config";
 import prisma from "../db";
-import { syncTrelloConnection } from "../integrations/trelloAdapter";
+import { trackerIntegrationTypes } from "../integrations/trackerRegistry";
 import { describeError } from "../utils/safeError";
+import { syncIntegrationConnection } from "./ingestionService";
 
 let timer: NodeJS.Timeout | null = null;
 let syncing = false;
 const sync = async () => {
   const connections = await prisma.integrationConnection.findMany({
-    where: { type: "TRELLO", enabled: true },
-    select: { id: true },
+    where: { type: { in: trackerIntegrationTypes() }, enabled: true },
+    select: { id: true, type: true },
   });
   for (const connection of connections)
     try {
-      await syncTrelloConnection(connection.id);
+      await syncIntegrationConnection(connection.id);
     } catch (error) {
       const message = describeError(error);
       await prisma.integrationConnection.update({
         where: { id: connection.id },
         data: { lastError: message },
       });
-      console.error(`Trello sync failed for ${connection.id}:`, message);
+      console.error(
+        `${connection.type} sync failed for ${connection.id}:`,
+        message,
+      );
     }
 };
 const tick = async () => {
@@ -29,17 +33,17 @@ const tick = async () => {
     await sync();
   } catch (error) {
     // A DB outage must not become an unhandled rejection (process exit).
-    console.error(`Trello polling failed: ${describeError(error)}`);
+    console.error(`Integration polling failed: ${describeError(error)}`);
   } finally {
     syncing = false;
   }
 };
-export const startTrelloPolling = async () => {
+export const startIntegrationPolling = async () => {
   await tick();
-  timer = setInterval(() => void tick(), config.trelloPollIntervalMs);
+  timer = setInterval(() => void tick(), config.integrationPollIntervalMs);
   timer.unref();
 };
-export const stopTrelloPolling = () => {
+export const stopIntegrationPolling = () => {
   if (timer) {
     clearInterval(timer);
     timer = null;

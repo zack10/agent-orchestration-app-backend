@@ -9,7 +9,7 @@ import {
   getBaseSha,
   getInstallationToken,
 } from "../integrations/githubApp";
-import { commentOnTrelloCard } from "../integrations/trelloAdapter";
+import { commentOnWorkItem } from "./ingestionService";
 import { NonRetryableError, describeError } from "../utils/safeError";
 import { runExecutionGraph } from "./agentGraph/executionGraph";
 import { hashSnapshot, submitPlan } from "./executionService";
@@ -19,25 +19,18 @@ import { publishApprovedDiff } from "./workspaceService";
 const TERMINAL: ExecutionStatus[] = ["COMPLETED", "BLOCKED", "FAILED", "CANCELED"];
 const RUN_STATES: ExecutionStatus[] = ["RUNNING", "VERIFYING"];
 
-const notifyTrello = async (executionId: string, text: string) => {
+/** Comments on the source ticket in whichever tracker it came from. Never throws. */
+const notifyTracker = async (executionId: string, text: string) => {
   try {
     const execution = await prisma.execution.findUnique({
       where: { id: executionId },
       include: { workItem: true },
     });
-    if (execution?.workItem.externalSystem !== "TRELLO") return;
-    const connection = await prisma.integrationConnection.findFirst({
-      where: { projectId: execution.projectId, type: "TRELLO", enabled: true },
-    });
-    if (connection)
-      await commentOnTrelloCard(
-        connection.id,
-        execution.workItem.externalId,
-        text,
-      );
+    if (execution)
+      await commentOnWorkItem(execution.projectId, execution.workItem, text);
   } catch (error) {
     console.error(
-      `Trello notification failed for execution ${executionId}: ${describeError(error)}`,
+      `Tracker notification failed for execution ${executionId}: ${describeError(error)}`,
     );
   }
 };
@@ -85,7 +78,7 @@ export const markExecutionFailed = async (
   });
   if (result.count === 0) return;
   await appendEvent(executionId, "EXECUTION_FAILED", { stage, reason });
-  await notifyTrello(
+  await notifyTracker(
     executionId,
     `Execution ${executionId} failed during ${stage}. Review the execution evidence.`,
   );
@@ -137,7 +130,7 @@ const plan = async (executionId: string) => {
       },
     ],
   });
-  await notifyTrello(
+  await notifyTracker(
     executionId,
     `Agent Orchestrator created a plan. Execution ${executionId} is awaiting plan approval.`,
   );
@@ -201,7 +194,7 @@ const run = async (executionId: string) => {
     select: { status: true },
   });
   if (execution?.status === "BLOCKED") {
-    await notifyTrello(
+    await notifyTracker(
       executionId,
       `Execution ${executionId} is blocked after verification failures. Review the execution evidence.`,
     );
@@ -314,7 +307,7 @@ const publish = async (executionId: string) => {
     where: { id: executionId },
     data: { status: "COMPLETED", branchName: branch, completedAt: new Date() },
   });
-  await notifyTrello(
+  await notifyTracker(
     executionId,
     `Draft pull request created: ${prUrl}\nExecution: ${executionId}`,
   );

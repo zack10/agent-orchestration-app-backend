@@ -13,7 +13,7 @@
     "prisma:migrate:local": "dotenv -e .env.local -- npx prisma migrate dev",
     "prisma:migrate:deploy": "npx prisma migrate deploy",
     "build": "prisma generate && rimraf dist && tsc",
-    "test": "npm run build && node --test tests/codeWriter.test.js tests/llmUtils.test.js tests/executionSecurity.test.js tests/agentGraphHelpers.test.js tests/auditFixes.test.js",
+    "test": "npm run build && node --test tests/codeWriter.test.js tests/llmUtils.test.js tests/executionSecurity.test.js tests/agentGraphHelpers.test.js tests/auditFixes.test.js tests/trackerAdapters.test.js",
     "verify": "npm run lint && npm test",
     "lint": "eslint . --ext .ts",
     "lint:fix": "eslint . --ext .ts --fix"

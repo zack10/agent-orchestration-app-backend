@@ -19,7 +19,8 @@
 | High | 10 | **10** | 0 |
 | Medium | 12 | 0 | 3 (M1, M3, M9) |
 | Low | 10 | 1 (L10, not a bug) | 0 |
-| Cleanup / docs / tests | 6 | **1 (X6)** | 2 (X3, X5) |
+| Cleanup / docs / tests | 6 | **2 (X3, X6)** | 1 (X5) |
+| Architecture | 2 | **1 (A1)** | 0 |
 
 **Current state (2026-10-17, after fix pass 1):** build ✅ · lint ✅ · **22/22 tests ✅** · `npm audit --omit=dev`: **0 vulnerabilities** (11 high remain in dev-only tooling, see H10).
 
@@ -55,6 +56,13 @@
 - All previously uncommitted work (pre-existing changes + pass 1 fixes) committed in logical chunks; each commit was type-checked on its own (see the commit list in `git log main..chore/repo-hygiene`).
 - Docs reorganized under `docs/` (moved, not deleted); tool folders and `scratch/` ignored; personal roadmap excluded locally.
 - Not merged or pushed: review the branch, then merge into `main`.
+
+### Pass 3 — 2026-10-17: tracker adapter refactor (A1), branch `chore/repo-hygiene`
+
+- Issue-tracker access goes through an `IssueTrackerAdapter` registry; Trello is the only adapter (no Jira support added).
+- Build ✅ · lint ✅ · **28/28 tests ✅** (6 new in `tests/trackerAdapters.test.js`).
+- Behaviour change: syncing a non-tracker integration (e.g. `GITHUB`) returns 400 instead of calling the Trello API.
+- Not verified against the live Trello API in this environment; the HTTP calls themselves are unchanged from before the refactor.
 
 ---
 
@@ -93,7 +101,7 @@
 
 ### - [x] C4 — A brief DB outage crashes the process
 **Status:** DONE · **Fix ref:** pass 1
-**Where:** `src/services/outboxService.ts`, `src/services/trelloPollingService.ts`
+**Where:** `src/services/outboxService.ts`, `src/services/trelloPollingService.ts` (now `integrationPollingService.ts`, see A1)
 **Fix:**
 - [x] Interval ticks are wrapped in try/catch with safe logging.
 - [x] Overlap guards (`flushing` / `syncing` flags) skip a tick while the previous one is still running.
@@ -278,7 +286,7 @@
 
 - [ ] **X1. Remove or wire up dead code:** `sendMessage`, `executeMcpAction`, `claimWorkItemLock`, `releaseWorkItemLock`, `transitionWorkItemStatus`, `constants/routing.ts`, `hashFile`; message recovery has no producer/consumer; unused models `ToolCall`, `ApiContract`, `WorkItem.status`/`lock*`.
 - [ ] **X2. Decide the future of the legacy Task pipeline** vs the Execution pipeline.
-- [ ] **X3. Docs.** PARTIAL: `.env.example` RabbitMQ port fixed (15673) and new vars documented. Remaining: the README claims skills/MCP resources are in agent context (they aren't), and README/CLAUDE.md should mention `AUTH_DISABLED`, the approval `snapshotHash` requirement, and the `.retry`/`.dead` queues.
+- [x] **X3. Docs.** DONE: `.env.example` RabbitMQ port fixed (15673) and new vars documented. README corrected (skills/MCP resources are *not* in prompts) and now documents fail-closed auth/CORS, `AUTH_DISABLED`, the approval `snapshotHash` body, `.retry`/`.dead` queues and the `FAILED` lifecycle, sandbox/publish guarantees, `LLM_MAX_OUTPUT_TOKENS`, single-test runs, the `db push` → migrations baseline, and the `docs/` layout. CLAUDE.md updated with the same rules.
 - [ ] **X4. Integration tests** against docker-compose Postgres + RabbitMQ: execution happy path, approval races (H7), handler failures → `FAILED` (C2), retry cap/DLQ against a live broker (C3), lease recovery, outbox/inbox dedup, HTTP routes incl. auth/validation.
 - [ ] **X5. Unit tests.** PARTIAL: added codeWriter (backticks, CRLF, `.git/`, symlinks, malformed), secret patterns, `describeError`, `validate`, auth, consumer retry/DLQ. Remaining: repoContext dotfiles (M5), provider truncation handling (H4), `decideApproval` guards (needs a DB).
 - [x] **X6. Repo hygiene.** DONE (pass 2, branch `chore/repo-hygiene`):
@@ -287,6 +295,34 @@
   - [x] Tool state ignored: `.copilot/` and `.cline/` added (`.aider*`, `.junie/`, `.obsidian/`, `copilot/`, `opencode.json` were already ignored).
   - [x] `scratch/` untracked and ignored; the files remain on disk.
   - [x] `applied_ai_engineer_6_month_roadmap.md` (personal notes) kept in place, excluded locally via `.git/info/exclude`, not committed.
+
+---
+
+## Architecture
+
+### - [x] A1 — Issue-tracker integration is hard-wired to Trello
+**Status:** DONE · **Fix ref:** pass 3 (uncommitted, branch `chore/repo-hygiene`)
+**Problem:** The data model was tracker-neutral (`WorkItem`, `IntegrationConnection`, `ExternalSystem` already lists `JIRA`), but every code path called Trello directly: the poller only queried `TRELLO` connections, `POST /integrations/:id/sync` called the Trello sync for any connection type, worker notifications were Trello-only, and the Trello adapter did WorkItem persistence and execution creation itself.
+**Fix:**
+- [x] `IssueTrackerAdapter` contract (`src/integrations/types.ts`): `fetchEligibleItems(config) → { repositoryId, items: NormalizedWorkItem[] }` and `comment(config, externalId, text)`.
+- [x] Registry (`src/integrations/trackerRegistry.ts`) keyed by `IntegrationType` and `ExternalSystem`; Trello is the only registered adapter.
+- [x] Trello adapter reduced to Trello API calls plus a pure `toWorkItems()` mapper; revision-hash formula unchanged (pinned by test) so existing cards keep their execution idempotency keys.
+- [x] New `src/services/ingestionService.ts`: tracker-neutral WorkItem upsert + `createExecution` (`syncIntegrationConnection`) and `commentOnWorkItem`.
+- [x] `trelloPollingService.ts` → `integrationPollingService.ts`, polling every registered tracker type. `INTEGRATION_POLL_INTERVAL_MS` added; `TRELLO_POLL_INTERVAL_MS` still honoured.
+- [x] `POST /api/integrations/:id/sync` dispatches by connection type; non-tracker types (e.g. `GITHUB`) now return 400 instead of being sent to the Trello API.
+- [x] Worker `notifyTrello` → `notifyTracker` (comments on the source ticket in whichever tracker it came from).
+- [x] Tests: `tests/trackerAdapters.test.js` (pinned Trello hash, label filtering, mapping, registry dispatch, plug-in registration).
+
+**Adding another tracker later** (deliberately not done; no Jira support exists):
+1. Add the value to `IntegrationType` in `prisma/schema.prisma` + migration (`ExternalSystem` may already have it), and allow it in the `POST /integrations` route schema.
+2. Implement `IssueTrackerAdapter` in `src/integrations/<tracker>Adapter.ts` with a stable `revisionHash`.
+3. Register it in `trackerRegistry.ts`.
+
+### - [ ] A2 — Source control is GitHub-only
+**Status:** TODO (only when a second provider is needed) · **Fix ref:** —
+**Where:** `src/integrations/githubApp.ts`, `src/services/workspaceService.ts` (`github.com` clone URLs), `src/services/executionWorker.ts` (`publish`); `Repository.provider` exists but is unused.
+**Fix:**
+- [ ] `ScmProvider` interface (`getBaseSha`, clone/auth, `findOpenPullRequest`, `createDraftPullRequest`) selected by `Repository.provider`.
 
 ---
 
