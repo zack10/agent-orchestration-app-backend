@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: agent_orchestration
     ports:
-      - '15432:5432'
+      - "15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -15,8 +15,8 @@ services:
     image: rabbitmq:3-management
     restart: always
     ports:
-      - '5672:5672'   # AMQP
-      - '15672:15672' # Management UI
+      - "15673:5672" # AMQP (changed to avoid Windows port conflict)
+      - "25672:15672" # Management UI (15672 is commonly reserved by Windows)
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest

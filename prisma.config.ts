@@ -1,8 +1,10 @@
-import { defineConfig, env } from "prisma/config";
+import { defineConfig } from "prisma/config";
 
 export default defineConfig({
   schema: "prisma/schema.prisma",
   datasource: {
-    url: env("DATABASE_URL"),
+    // Client generation must work in build environments without database secrets.
+    // Runtime and migration commands still receive DATABASE_URL from their environment.
+    url: process.env.DATABASE_URL ?? "postgresql://unused:unused@localhost:5432/unused",
   },
 });
