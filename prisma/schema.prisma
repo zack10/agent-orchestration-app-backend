@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
+  provider = "postgresql"
 }
 
 enum ExternalSystem {
@@ -31,6 +31,92 @@ enum ContractStatus {
   REJECTED
 }
 
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+}
+
+enum IntegrationType {
+  TRELLO
+  GITHUB
+}
+
+enum ExecutionStatus {
+  INGESTED
+  PLANNING
+  AWAITING_PLAN_APPROVAL
+  QUEUED
+  RUNNING
+  VERIFYING
+  AWAITING_PUBLISH_APPROVAL
+  PUBLISHING
+  COMPLETED
+  BLOCKED
+  FAILED
+  CANCELED
+}
+
+enum PlanStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  SUPERSEDED
+}
+
+enum PlanTaskStatus {
+  BLOCKED
+  READY
+  RUNNING
+  VERIFYING
+  COMPLETED
+  FAILED
+  CANCELED
+}
+
+enum AttemptStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELED
+}
+
+enum ApprovalType {
+  PLAN
+  PUBLISH
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ToolCallStatus {
+  REQUESTED
+  RUNNING
+  COMPLETED
+  DENIED
+  FAILED
+}
+
+enum ArtifactType {
+  PLAN
+  PATCH
+  DIFF
+  LOG
+  VERIFICATION
+  PULL_REQUEST
+}
+
+enum OutboxStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+}
+
 model Agent {
   id          String        @id @default(uuid())
   name        String
@@ -56,18 +142,22 @@ model Agent {
 }
 
 model Project {
-  id                   String   @id @default(uuid())
-  name                 String
-  description          String?
-  techStack            String?
+  id                    String  @id @default(uuid())
+  name                  String
+  description           String?
+  techStack             String?
   architectureDecisions String?
-  contextData          Json?    @default("{}")
-  
-  agents               Agent[]
-  tasks                Task[]
-  
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  contextData           Json?   @default("{}")
+
+  agents       Agent[]
+  tasks        Task[]
+  repositories Repository[]
+  integrations IntegrationConnection[]
+  workItems    WorkItem[]
+  executions   Execution[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model Skill {
@@ -81,28 +171,42 @@ model Skill {
 }
 
 model Task {
-  id        String   @id @default(uuid())
-  payload   Json
-  status    String
-  agent     Agent    @relation(fields: [agentId], references: [id])
-  agentId   String
-  result    Json?
-  
+  id             String     @id @default(uuid())
+  payload        Json
+  status         TaskStatus @default(PENDING)
+  agent          Agent      @relation(fields: [agentId], references: [id])
+  agentId        String
+  result         Json?
+  attemptCount   Int        @default(0)
+  maxAttempts    Int        @default(3)
+  lastError      String?
+  idempotencyKey String?    @unique
+  queuedAt       DateTime?
+  startedAt      DateTime?
+  completedAt    DateTime?
+
   project   Project? @relation(fields: [projectId], references: [id])
   projectId String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([status, queuedAt])
 }
 
 model Message {
-  id         String   @id @default(uuid())
-  content    Json
-  sender     Agent    @relation("SentMessages", fields: [senderId], references: [id])
-  senderId   String
-  receiver   Agent    @relation("ReceivedMessages", fields: [receiverId], references: [id])
-  receiverId String
-  createdAt  DateTime @default(now())
+  id              String    @id @default(uuid())
+  content         Json
+  sender          Agent     @relation("SentMessages", fields: [senderId], references: [id])
+  senderId        String
+  receiver        Agent     @relation("ReceivedMessages", fields: [receiverId], references: [id])
+  receiverId      String
+  createdAt       DateTime  @default(now())
+  publishedAt     DateTime?
+  publishAttempts Int       @default(0)
+  lastError       String?
+
+  @@index([publishedAt, publishAttempts])
 }
 
 model MCPResource {
@@ -130,9 +234,15 @@ model WorkItem {
 
   lockOwner    String?
   lockUntil    DateTime?
-  attemptCount Int       @default(0)
+  attemptCount Int         @default(0)
   lastError    String?
   metadata     Json?
+  project      Project?    @relation(fields: [projectId], references: [id])
+  projectId    String?
+  sourceUrl    String?
+  revisionHash String?
+  rawSnapshot  Json?
+  executions   Execution[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -140,6 +250,219 @@ model WorkItem {
   @@unique([externalSystem, externalId])
   @@index([externalSystem, boardId])
   @@index([status, assigneeRole])
+}
+
+model Repository {
+  id                   String      @id @default(uuid())
+  project              Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId            String
+  provider             String      @default("GITHUB")
+  owner                String
+  name                 String
+  defaultBranch        String      @default("main")
+  githubInstallationId String
+  verificationConfig   Json
+  executionPolicy      Json
+  active               Boolean     @default(true)
+  executions           Execution[]
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  @@unique([owner, name])
+  @@index([projectId, active])
+}
+
+model IntegrationConnection {
+  id              String          @id @default(uuid())
+  project         Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId       String
+  type            IntegrationType
+  name            String
+  encryptedConfig Json
+  enabled         Boolean         @default(true)
+  cursor          String?
+  lastSyncedAt    DateTime?
+  lastError       String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@unique([projectId, type, name])
+  @@index([type, enabled])
+}
+
+model Execution {
+  id             String           @id @default(uuid())
+  project        Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId      String
+  workItem       WorkItem         @relation(fields: [workItemId], references: [id], onDelete: Restrict)
+  workItemId     String
+  repository     Repository       @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  repositoryId   String
+  status         ExecutionStatus  @default(INGESTED)
+  idempotencyKey String           @unique
+  correlationId  String           @unique
+  baseSha        String?
+  branchName     String?
+  budget         Json
+  lastError      String?
+  leaseUntil     DateTime?
+  plans          Plan[]
+  approvals      Approval[]
+  events         ExecutionEvent[]
+  artifacts      Artifact[]
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  completedAt    DateTime?
+
+  @@index([status, updatedAt])
+  @@index([status, leaseUntil])
+  @@index([workItemId, createdAt])
+}
+
+model Plan {
+  id                 String     @id @default(uuid())
+  execution          Execution  @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  executionId        String
+  version            Int
+  status             PlanStatus @default(DRAFT)
+  summary            String
+  acceptanceCriteria Json
+  estimates          Json
+  snapshotHash       String
+  tasks              PlanTask[]
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  @@unique([executionId, version])
+}
+
+model PlanTask {
+  id             String               @id @default(uuid())
+  plan           Plan                 @relation(fields: [planId], references: [id], onDelete: Cascade)
+  planId         String
+  key            String
+  title          String
+  description    String
+  type           String
+  status         PlanTaskStatus       @default(BLOCKED)
+  expectedOutput Json
+  attempts       TaskAttempt[]
+  dependencies   PlanTaskDependency[] @relation("TaskDependencies")
+  dependents     PlanTaskDependency[] @relation("TaskDependents")
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  @@unique([planId, key])
+  @@index([status, updatedAt])
+}
+
+model PlanTaskDependency {
+  task        PlanTask @relation("TaskDependencies", fields: [taskId], references: [id], onDelete: Cascade)
+  taskId      String
+  dependsOn   PlanTask @relation("TaskDependents", fields: [dependsOnId], references: [id], onDelete: Cascade)
+  dependsOnId String
+
+  @@id([taskId, dependsOnId])
+}
+
+model TaskAttempt {
+  id          String        @id @default(uuid())
+  planTask    PlanTask      @relation(fields: [planTaskId], references: [id], onDelete: Cascade)
+  planTaskId  String
+  number      Int
+  status      AttemptStatus @default(RUNNING)
+  workspaceId String
+  error       String?
+  toolCalls   ToolCall[]
+  artifacts   Artifact[]
+  startedAt   DateTime      @default(now())
+  completedAt DateTime?
+
+  @@unique([planTaskId, number])
+}
+
+model ToolCall {
+  id          String         @id @default(uuid())
+  attempt     TaskAttempt    @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  attemptId   String
+  name        String
+  status      ToolCallStatus @default(REQUESTED)
+  input       Json
+  output      Json?
+  policy      Json
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime       @default(now())
+
+  @@index([attemptId, createdAt])
+}
+
+model Artifact {
+  id          String       @id @default(uuid())
+  execution   Execution    @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  executionId String
+  attempt     TaskAttempt? @relation(fields: [attemptId], references: [id], onDelete: SetNull)
+  attemptId   String?
+  type        ArtifactType
+  name        String
+  storagePath String
+  sha256      String
+  metadata    Json
+  createdAt   DateTime     @default(now())
+
+  @@index([executionId, type])
+}
+
+model Approval {
+  id           String         @id @default(uuid())
+  execution    Execution      @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  executionId  String
+  type         ApprovalType
+  status       ApprovalStatus @default(PENDING)
+  snapshotHash String
+  actor        String?
+  comment      String?
+  requestedAt  DateTime       @default(now())
+  decidedAt    DateTime?
+
+  @@index([status, requestedAt])
+}
+
+model ExecutionEvent {
+  id            String    @id @default(uuid())
+  execution     Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  executionId   String
+  sequence      Int
+  type          String
+  payload       Json
+  correlationId String
+  createdAt     DateTime  @default(now())
+
+  @@unique([executionId, sequence])
+  @@index([correlationId, createdAt])
+}
+
+model OutboxEvent {
+  id          String       @id @default(uuid())
+  topic       String
+  aggregateId String
+  payload     Json
+  status      OutboxStatus @default(PENDING)
+  attempts    Int          @default(0)
+  availableAt DateTime     @default(now())
+  publishedAt DateTime?
+  lastError   String?
+  createdAt   DateTime     @default(now())
+
+  @@index([status, availableAt])
+}
+
+model InboxReceipt {
+  messageId  String   @id
+  consumer   String
+  receivedAt DateTime @default(now())
+
+  @@index([consumer, receivedAt])
 }
 
 model ApiContract {
