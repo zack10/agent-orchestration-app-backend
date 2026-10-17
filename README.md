@@ -1,143 +1,92 @@
 # Agent Orchestration Backend
 
-A robust, modern backend architecture designed for building and orchestrating autonomous AI agents using a message-driven approach.
+Express/TypeScript backend for durable AI-agent task execution with PostgreSQL, Prisma, RabbitMQ, and pluggable LLM providers.
 
----
+## Implemented architecture
 
-## 🚀 Key Features
+1. `POST /api/tasks` validates and persists a task, using `Idempotency-Key` when supplied.
+2. The API publishes the task ID to a durable RabbitMQ topic exchange using publisher confirms.
+3. A worker atomically claims the task and invokes its configured LLM provider.
+4. Failed executions are sent through a delayed retry queue up to the task's maximum attempt count.
+5. Pending tasks and expired execution leases are recovered by a periodic sweep.
+6. Structured agent output updates task/project state and may write bounded files only under `generated-code/`.
 
-*   **Message-Driven Architecture**: Fully integrated with **RabbitMQ** for reliable, asynchronous inter-agent communication.
-*   **Pluggable MCP Service**: A "Model Context Protocol" implementation that uses a connector registry pattern. Easily add new external tools (HTTP, Slack, GitHub, etc.) without touching core logic.
-*   **Hybrid Database System**: Powered by **Prisma Postgres**, with built-in support for both **Local (Docker)** and **Cloud (Accelerate)** environments.
-*   **Autonomous Agent Runner**: A central engine that subscribes to agent-specific message queues and executes actions through assigned resources.
-*   **Strict Type Safety**: 100% TypeScript with auto-generated Prisma models.
+RabbitMQ is currently used for task execution and the internal messaging service. MCP resources use a connector registry; only the allowlisted HTTP connector is implemented.
 
----
+## Requirements
 
-## 🛠 Tech Stack
+- Node.js 20 LTS or newer
+- Docker Desktop with Compose
 
-- **Runtime**: Node.js (v18+)
-- **Language**: TypeScript
-- **Framework**: Express.js
-- **Database**: PostgreSQL (via Prisma ORM)
-- **Messaging**: RabbitMQ
-- **Environment**: Docker & Docker Compose
-- **Client Acceleration**: Prisma Accelerate (Cloud connection pooling)
+## Local setup
 
----
-
-## 🗺 System Architecture
-
-The following diagram illustrates the flow of data and control within the Agent Orchestration System:
-
-```mermaid
-graph TD
-    User((User/Client)) -->|REST API| Express[Express Controllers]
-    
-    subgraph "Core System"
-        Express -->|Save State| Prisma[Prisma ORM]
-        Express -->|Dispatch| MsgSrv[Messaging Service]
-        MsgSrv -->|Publish| RMQ[(RabbitMQ)]
-        
-        RMQ -->|Consume| Runner[Agent Runner]
-        
-        Runner -->|Logic| Skills[Skills Engine]
-        Runner -->|External Action| MCP[MCP Service]
-        
-        subgraph "MCP Registry"
-            MCP -->|Registry| Conn[HTTP/Slack/Jira Connectors]
-        end
-        
-        Conn -->|API Request| World((Outside World))
-    end
-    
-    Prisma -->|Storage| DB[(PostgreSQL)]
-    Runner -->|Update Result| Prisma
-```
-
----
-
-## 🔍 Detailed Component Breakdown
-
-### 1. Messaging System (`RabbitMQService`)
-This is the "Nervous System" of the application. It ensures that agents can communicate without being tightly coupled.
-*   **Standardized Payload**: Every message uses the `AgentMessagePayload` type, which includes `senderId`, `receiverId`, `content`, and `timestamp`.
-*   **Decoupling**: When a user sends a message to an agent, the API doesn't "call" the agent. It drops a message in RabbitMQ, and the system ensures the correct `AgentRunner` picks it up when ready.
-
-### 2. The Orchestrator (`AgentRunner`)
-The `AgentRunner` is the "Brain" of each agent.
-*   **Subscriptions**: It manages the RabbitMQ connection for a specific agent id, listening to the `agent.<id>.message` queue.
-*   **Lifecycle**: When a message arrives, it:
-    1.  Validates the message.
-    2.  Updates the status in the Database.
-    3.  Determines if a **Skill** (internal logic) or a **Connector** (external action) is needed.
-
-### 3. MCP & Connectors (`McpService`)
-The **Model Context Protocol (MCP)** service acts as the "Hands" of the agent.
-*   **Connector Registry**: Instead of hardcoding API calls (like `axios.get`), the system looks up a "Connector" based on the resource type (e.g., `HTTP`).
-*   **Extensibility**: You can add a new capability (e.g., adding a Google Calendar connector) simply by creating a new class that implements the `McpConnector` interface and registering it.
-
-### 4. Database Layer (`Prisma`)
-Acts as the "Memory" of the system.
-*   **State Persistence**: Every interaction, message, and task status is logged here.
-*   **Hybrid Sync**: We use a `DIRECT_URL` for administrative tasks (like schema changes) and a `DATABASE_URL` for application traffic.
-
----
-
-## 🔄 Core Data Flow
-1.  **Command**: A User sends a POST request to `/agents/:id/messages`.
-2.  **Ingestion**: `MessagingService` saves the message to PostgreSQL and publishes it to RabbitMQ.
-3.  **Processing**: The `AgentRunner` for that agent hears the message from RabbitMQ.
-4.  **Action**: If the message requires an external task, the Runner calls `McpService.execute()`.
-5.  **Execution**: The `HttpConnector` makes a real network request.
-6.  **Resolution**: The Runner receives the result, saves it to the DB as a `Task` result, and can publish a reply message back to the exchange.
-
----
-
-## 🏁 Getting Started
-
-### 1. Prerequisites
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (For local DB and RabbitMQ)
-- [Node.js](https://nodejs.org/) (LTS version)
-
-### 2. Environment Setup
-The project uses a split-environment system.
-1.  **Local**: Uses [`.env.local`](file:///.env.local) (Points to Docker containers).
-2.  **Cloud**: Uses [`.env.cloud`](file:///.env.cloud) (Points to Prisma Postgres Cloud).
-
-### 3. Installation & Run
 ```powershell
-# Install dependencies
-npm install
-
-# Start local infrastructure (Postgres & RabbitMQ)
+Copy-Item .env.example .env.local
+# Set ENCRYPTION_KEY and provider credentials in .env.local.
 docker-compose up -d
-
-# Run in Local Dev Mode (Default)
-npm run dev
-
-# Run in Cloud Dev Mode
-npm run dev:cloud
+npm install
+npm run prisma:migrate:local
+npm run dev:local
 ```
 
----
+The API listens on port `3001` by default. `GET /health` is intentionally unauthenticated for container/platform probes.
 
-## 📖 Essential Scripts
+When `API_AUTH_TOKEN` is configured, all `/api/*` routes require:
 
-| Command | Action |
-| :--- | :--- |
-| `npm run dev:local` | Launches the app with local database/messaging. |
-| `npm run dev:cloud` | Launches the app with cloud database credentials. |
-| `npm run prisma:push:local` | Syncs your schema to the local Docker database. |
-| `npm run prisma:push:cloud`| Syncs your schema to the Prisma Postgres Cloud. |
-| `npx prisma studio` | Opens a GUI to view and edit your database data. |
+```text
+Authorization: Bearer <API_AUTH_TOKEN>
+```
 
----
+Production mode refuses to start without `API_AUTH_TOKEN`, `CORS_ORIGINS`, `DATABASE_URL`, and `ENCRYPTION_KEY`.
 
-## 📚 Further Reading
-*   [**Prisma Usage Guide**](file:///PRISMA_GUIDE.md): Detailed guide on managing the database and migrations.
+## Important API behavior
 
----
+- Task creation returns `202 Accepted`; execution is asynchronous.
+- Send a stable `Idempotency-Key` header when creating tasks so client retries do not duplicate work.
+- Provider discovery accepts temporary credentials in the `POST /api/llm/discover` body.
+- `GET /api/llm/models` accepts an optional provider credential through `X-Provider-Api-Key`, never the URL.
+- `/api/llm/usage` returns `501` when the provider has no safe account-usage API. It never performs paid inference as a usage probe.
+- Agent API keys supplied in `config.apiKey` are encrypted at rest and redacted from API responses.
 
-## ⚖️ License
-Internal Project - All Rights Reserved.
+## Security configuration
+
+HTTP MCP calls are denied unless their hostname appears in `MCP_HTTP_ALLOWED_HOSTS`. Redirects and embedded URL credentials are rejected. Private IP targets additionally require `MCP_HTTP_ALLOW_PRIVATE_IPS=true`; use this only for explicitly trusted internal services.
+
+Generated output is confined below `generated-code/<project>/`, with configurable file-count and size limits. Raw LLM output is not persisted unless `STORE_RAW_LLM_OUTPUT=true`.
+
+The built-in rate limiter is per-process. Multi-instance production deployments should replace it with a shared Redis-backed limiter at the ingress or application layer.
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `npm run dev:local` | Run with `.env.local` |
+| `npm run dev:cloud` | Run with `.env.cloud` |
+| `npm run prisma:migrate:local` | Create/apply a local schema migration |
+| `npm run prisma:migrate:deploy` | Apply committed migrations in deployment |
+| `npm run build` | Generate Prisma Client and compile TypeScript |
+| `npm run lint` | Run ESLint |
+| `npm test` | Build and run unit tests |
+| `npm run verify` | Run lint, build, and tests |
+
+Before the first deployment, run `npm run prisma:migrate:local` and commit the generated `prisma/migrations` directory. Database migrations are intentionally tracked.
+
+## Current MVP boundary
+
+- One HTTP MCP connector is implemented; this is not a complete Model Context Protocol transport.
+- Agent skills/resources are persisted and included in agent context, but automatic tool selection/execution is not yet implemented.
+- Rate limiting and logs are process-local. Production deployments should provide centralized logs, metrics, tracing, and a shared rate limiter.
+
+## Trello-to-GitHub vertical slice
+
+The backend now supports the first controlled workflow: an eligible Trello bug card creates an execution, a plan waits for approval, work runs in a bounded Docker workspace, configured Node scripts verify the change, the exact diff waits for publish approval, and a GitHub App creates a draft pull request.
+
+Configure `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`, then create:
+
+1. A repository record with GitHub owner/name, installation ID, and `verificationConfig`, for example `{ "scripts": ["lint", "build", "test"] }`.
+2. A Trello integration whose encrypted config contains `apiKey`, `token`, `boardId`, `eligibleLabel`, and the repository ID.
+3. A project implementation agent using Gemini.
+
+Use `POST /api/integrations/:id/sync` for a manual Trello sync. Inspect `/api/work-items` and `/api/executions`, then decide plan and publish approvals through `POST /api/executions/:id/approvals/plan` and `/publish` with `{ "approved": true }`.
+
+Docker Desktop must be running before an approved plan can execute. The first slice supports Node/TypeScript repositories and creates draft PRs only; it never merges or deploys.

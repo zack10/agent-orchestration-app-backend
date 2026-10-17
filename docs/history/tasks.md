@@ -1,0 +1,9 @@
+- [x] Set up infrastructure with `docker-compose.yml`
+- [x] Install dependencies (`amqplib`, `dotenv`)
+- [x] Implement `RabbitMQService` (Singleton)
+- [x] Define standardized message interfaces
+- [x] Update `MessagingService` to publish to RabbitMQ
+- [x] Enhance `MCPService` with a pluggable connector architecture
+- [x] Create basic `HttpConnector` for MCP
+- [x] Update `AgentRunner` to subscribe to messages and use services
+- [x] Verify integrated flow (Task -> Runner -> MCP/Messaging)

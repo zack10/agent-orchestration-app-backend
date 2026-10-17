@@ -27,7 +27,7 @@ npm run lint:fix
 - **Entry**: `src/index.ts` (Express + routes)
 - **Port**: 3001
 - **DB**: Prisma ORM → PostgreSQL (local: port 15432, cloud: Accelerate)
-- **Messaging**: RabbitMQ (port 5672, mgmt UI: 15672)
+- **Messaging**: RabbitMQ (port 5672, mgmt UI host port: 25672)
 - **LLM Providers**: Gemini, OpenAI, Anthropic in `src/services/llm/providers/`
 
 ## Project Structure
