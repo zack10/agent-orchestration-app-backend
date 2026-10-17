@@ -1,0 +1,20 @@
+import { Router } from 'express';
+import { z } from 'zod';
+import { approve, createIntegration, createPlan, createRepository, getExecution, getWorkItem, listExecutions, listIntegrations, listRepositories, listWorkItems, startExecution, syncIntegration } from '../controllers/executionController';
+import { validate } from '../middleware/validate';
+
+const router = Router();
+const uuid = z.string().uuid();
+router.post('/repositories', validate(z.object({ body: z.object({ projectId: uuid, owner: z.string().regex(/^[a-zA-Z0-9_.-]+$/), name: z.string().regex(/^[a-zA-Z0-9_.-]+$/), defaultBranch: z.string().regex(/^[a-zA-Z0-9_./-]+$/).default('main'), githubInstallationId: z.string().min(1), verificationConfig: z.object({ scripts: z.array(z.string().regex(/^[a-zA-Z0-9:_-]+$/)).min(1) }), executionPolicy: z.object({ maxChangedFiles: z.number().int().min(1).max(100).default(20), protectedPaths: z.array(z.string()).default(['package.json', 'package-lock.json', '.github']) }) }) })), createRepository);
+router.get('/repositories', listRepositories);
+router.post('/integrations', validate(z.object({ body: z.object({ projectId: uuid, type: z.enum(['TRELLO', 'GITHUB']), name: z.string().min(1), config: z.record(z.unknown()) }) })), createIntegration);
+router.get('/integrations', listIntegrations);
+router.post('/integrations/:id/sync', validate(z.object({ params: z.object({ id: uuid }) })), syncIntegration);
+router.get('/work-items', listWorkItems);
+router.get('/work-items/:id', validate(z.object({ params: z.object({ id: uuid }) })), getWorkItem);
+router.post('/executions', validate(z.object({ body: z.object({ projectId: uuid, workItemId: uuid, repositoryId: uuid }) })), startExecution);
+router.get('/executions', listExecutions);
+router.get('/executions/:id', validate(z.object({ params: z.object({ id: uuid }) })), getExecution);
+router.post('/executions/:id/plans', validate(z.object({ params: z.object({ id: uuid }), body: z.object({ summary: z.string().min(1), acceptanceCriteria: z.array(z.unknown()).min(1), tasks: z.array(z.object({ key: z.string().min(1), title: z.string().min(1), description: z.string().min(1), type: z.string().optional(), dependsOn: z.array(z.string()).optional() })).min(1).max(20) }) })), createPlan);
+router.post('/executions/:id/approvals/:type', validate(z.object({ params: z.object({ id: uuid, type: z.enum(['plan', 'publish']) }), body: z.object({ approved: z.boolean(), snapshotHash: z.string().regex(/^[a-f0-9]{64}$/), comment: z.string().max(2000).optional() }) })), approve);
+export default router;
