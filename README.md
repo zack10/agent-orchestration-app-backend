@@ -113,6 +113,18 @@ flowchart LR
 
 If RabbitMQ is unavailable at startup in non-production, the API still starts in degraded mode (`/health` reports it).
 
+### Where output is written on disk
+
+The two pipelines write to different folders. All three are gitignored.
+
+| Folder | Pipeline | What's in it |
+| --- | --- | --- |
+| `generated-code/<project>/` | Task pipeline | Files from an agent's `FILE` blocks in a task reply. This is the task's final output. |
+| `workspaces/<executionId>/` (`WORKSPACE_ROOT`) | Execution pipeline | A full clone of the target repo where the agent edits files and verification runs. It's a scratch copy, not the output. |
+| `artifacts/<executionId>.diff` (`ARTIFACT_ROOT`) | Execution pipeline | The exact diff that was verified, reviewed and approved. This is what gets published. |
+
+Publishing never reads `workspaces/`. It clones the repository fresh, applies the `.diff` from `artifacts/`, and pushes, so the PR always contains exactly the approved bytes.
+
 ## How the Trello → pull request workflow runs
 
 ### End to end
@@ -437,6 +449,11 @@ src/
 prisma/                 schema and committed migrations
 tests/                  unit tests (against dist/) and tests/e2e/
 docs/                   plans, specs, testing, guides, history
+
+# created at runtime (gitignored)
+generated-code/         task pipeline output
+workspaces/             execution scratch clones, one per execution
+artifacts/              approved diffs, one per execution
 ```
 
 ## Known limits
@@ -445,6 +462,7 @@ docs/                   plans, specs, testing, guides, history
 - **Node/TypeScript repositories only**, verified through their npm scripts.
 - **Repository context is selected by file name.** The agent sees up to 12 files whose paths match ticket words, each cut at 20 KB, and returns whole files. Vague tickets and very large files are weak spots.
 - **The agent can modify existing tests.** Hidden acceptance tests are the planned guard (see the coding evaluation plan).
+- **Workspaces are not cleaned up.** Each execution leaves its full clone in `workspaces/`; the folder is only wiped before a re-clone. Delete old folders by hand for now; nothing reads them after the diff artifact is stored.
 - **One HTTP connector**, not a full Model Context Protocol transport. Skills and MCP resources are stored and assignable but not yet included in prompts.
 - **Process-local** rate limiting and logs. Multi-instance deployments need a shared limiter (e.g. Redis), centralized logs, metrics and tracing.
 
