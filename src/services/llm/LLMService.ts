@@ -1,7 +1,9 @@
 import dotenv from "dotenv";
+import { config } from "../../config";
 import { AnthropicProvider } from "./providers/AnthropicProvider";
 import { GeminiProvider } from "./providers/GeminiProvider";
 import { OpenAIProvider } from "./providers/OpenAIProvider";
+import { withLLMRetry } from "./retry";
 import { LLMProvider, Model, UsageStats } from "./types";
 
 export type ProviderKey = "gemini" | "openai" | "anthropic";
@@ -45,7 +47,10 @@ export class LLMService {
     if (!provider) {
       throw new Error(`Provider ${providerKey} not found`);
     }
-    return provider.generateContent(model, prompt, apiKey);
+    return withLLMRetry(
+      () => provider.generateContent(model, prompt, apiKey),
+      { retries: config.llmRateLimitRetries },
+    );
   }
 
   /**

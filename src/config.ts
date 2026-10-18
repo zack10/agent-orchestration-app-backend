@@ -46,6 +46,10 @@ export const config = {
     process.env.LLM_MAX_OUTPUT_TOKENS,
     16_000,
   ),
+  llmRateLimitRetries: parsePositiveInt(
+    process.env.LLM_RATE_LIMIT_RETRIES,
+    3,
+  ),
   apiRateLimitPerMinute: parsePositiveInt(
     process.env.API_RATE_LIMIT_PER_MINUTE,
     120,

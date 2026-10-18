@@ -126,7 +126,9 @@ const readSelectedFiles = async (root: string, files: string[]) => {
 const formatSummary = (context: Omit<RepoContext, "summary">) => {
   const selected = context.selectedFileContents
     .map(
-      (file) => `FILE: ${file.path}\n${file.content.slice(0, MAX_FILE_BYTES)}`,
+      // Not the "FILE:" output syntax, so models don't echo it back unfenced.
+      (file) =>
+        `--- ${file.path} ---\n${file.content.slice(0, MAX_FILE_BYTES)}\n--- end of ${file.path} ---`,
     )
     .join("\n\n");
   return [

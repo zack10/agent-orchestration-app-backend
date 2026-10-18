@@ -5,7 +5,7 @@ import path from "node:path";
 import { config } from "../../config";
 import prisma from "../../db";
 import { getBaseSha, getInstallationToken } from "../../integrations/githubApp";
-import { writeActionsToRoot } from "../../utils/codeWriter";
+import { parseFileActions, writeActionsToRoot } from "../../utils/codeWriter";
 import { decrypt } from "../../utils/crypto";
 import { NonRetryableError } from "../../utils/safeError";
 import { parseAgentOutput } from "../../utils/llmUtils";
@@ -23,12 +23,14 @@ import { RepoContext, collectRepoContext } from "./repoContext";
 
 const llm = new LLMService();
 const MAX_ATTEMPTS = 3;
+const FILE_BLOCK_FORMAT = `Each changed file is one block: a line "FILE: relative/path", then an opening fence line such as \`\`\`md, then the COMPLETE new file content, then a line containing only \`\`\`. Put all blocks in the JSON "actions" string.`;
 
 type VerificationResult = Awaited<ReturnType<typeof verifyWorkspace>>;
 type GraphRoute =
   | "retry"
   | "blocked"
   | "review"
+  | "implemented"
   | "artifact"
   | "skipped"
   | undefined;
@@ -275,17 +277,52 @@ ${state.repoContext?.summary ?? "No repository context was collected."}
 Previous failure or review feedback:
 ${state.lastFailure || "None"}
 
-Return JSON with an "actions" string containing FILE blocks only.`,
+Return JSON with an "actions" string containing FILE blocks only. ${FILE_BLOCK_FORMAT}`,
     },
     state.agentApiKey,
   );
   const parsed = parseAgentOutput(raw);
+
+  // A malformed reply is a failed attempt the model can correct, not a crash
+  // of the whole run. Parsing is pure, so nothing has been written yet.
+  let formatError: string | undefined;
+  try {
+    parseFileActions(parsed.actions);
+  } catch (error) {
+    formatError = error instanceof Error ? error.message : String(error);
+  }
+  if (formatError) {
+    await prisma.taskAttempt.update({
+      where: { id: attempt.id },
+      data: {
+        status: "FAILED",
+        error: `${formatError}\n--- model reply (tail) ---\n${raw.slice(-4000)}`,
+        completedAt: new Date(),
+      },
+    });
+    await graphEvent(state.executionId, "GRAPH_OUTPUT_REJECTED", {
+      attemptId: attempt.id,
+      attemptNumber,
+      reason: formatError,
+    });
+    return {
+      attemptNumber,
+      attemptId: attempt.id,
+      lastFailure: `Your previous reply was rejected: ${formatError}. ${FILE_BLOCK_FORMAT}`,
+      route: (attemptNumber < MAX_ATTEMPTS ? "retry" : "blocked") as GraphRoute,
+    };
+  }
+
   writeActionsToRoot(
     parsed.actions,
     path.resolve(config.workspaceRoot, state.executionId),
   );
 
-  return { attemptNumber, attemptId: attempt.id };
+  return {
+    attemptNumber,
+    attemptId: attempt.id,
+    route: "implemented" as GraphRoute,
+  };
 };
 
 const enforceRepositoryPolicy = async (
@@ -576,7 +613,11 @@ const graph = new StateGraph(ExecutionGraphState)
   .addEdge("load_context", "inspect_repo")
   .addEdge("inspect_repo", "plan_change")
   .addEdge("plan_change", "implement_change")
-  .addEdge("implement_change", "enforce_policy")
+  .addConditionalEdges("implement_change", routeAfterVerification, {
+    implemented: "enforce_policy",
+    retry: "implement_change",
+    blocked: "block_execution",
+  })
   .addEdge("enforce_policy", "verify_change")
   .addConditionalEdges("verify_change", routeAfterVerification, {
     retry: "analyze_failure",

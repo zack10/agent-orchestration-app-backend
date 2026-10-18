@@ -13,7 +13,9 @@
     "prisma:migrate:local": "dotenv -e .env.local -- npx prisma migrate dev",
     "prisma:migrate:deploy": "npx prisma migrate deploy",
     "build": "prisma generate && rimraf dist && tsc",
-    "test": "npm run build && node --test tests/codeWriter.test.js tests/llmUtils.test.js tests/executionSecurity.test.js tests/agentGraphHelpers.test.js tests/auditFixes.test.js tests/trackerAdapters.test.js",
+    "test": "npm run build && node --test tests/codeWriter.test.js tests/llmUtils.test.js tests/executionSecurity.test.js tests/agentGraphHelpers.test.js tests/auditFixes.test.js tests/trackerAdapters.test.js tests/llmRetry.test.js",
+    "test:e2e": "dotenv -e .env.e2e -- node --test --test-concurrency=1 tests/e2e/smoke.test.js tests/e2e/taskPipeline.test.js tests/e2e/executionPipeline.test.js",
+    "test:e2e:smoke": "dotenv -e .env.e2e -- node --test tests/e2e/smoke.test.js",
     "verify": "npm run lint && npm test",
     "lint": "eslint . --ext .ts",
     "lint:fix": "eslint . --ext .ts --fix"

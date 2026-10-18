@@ -94,8 +94,22 @@ The built-in rate limiter is per-process. Multi-instance production deployments 
 | `npm run lint` | Run ESLint |
 | `npm test` | Build and run unit tests |
 | `npm run verify` | Run lint, build, and tests |
+| `npm run test:e2e` | End-to-end suites against a running server |
+| `npm run test:e2e:smoke` | Only the credential-free smoke suite |
 
 Tests use `node:test` and run against the compiled `dist/` output. To run a single file: `npm run build && node --test tests/auditFixes.test.js`. New test files must be added to the `test` script in `package.json`.
+
+### End-to-end tests
+
+`tests/e2e/` drives a **running** server over HTTP (start it with `npm run dev:local` first). Copy `.env.e2e.example` to `.env.e2e` and fill in what you have; each suite skips itself, naming the missing variables, until its credentials are set:
+
+| Suite | Needs | Covers |
+| --- | --- | --- |
+| `smoke` | server only | health, auth, validation, 404s, project lifecycle, non-tracker sync refused |
+| `taskPipeline` | `E2E_LLM_*` | agent key redaction, `Idempotency-Key`, queued task runs to `COMPLETED` |
+| `executionPipeline` | `E2E_LLM_*`, `E2E_TRELLO_*`, `E2E_GITHUB_*` (server also needs the GitHub App and Docker) | Trello card → sync → plan approval (stale hash rejected) → run → diff bound to publish approval → draft PR → Trello comment |
+
+The execution suite creates a real Trello card and, unless `E2E_PUBLISH=false`, opens a draft PR, so point it at a throwaway repository. It deletes the card afterwards and, when `E2E_GITHUB_TOKEN` is set, closes the PR and deletes the branch (`E2E_KEEP_RESOURCES=true` keeps them). It reuses one `e2e-execution-pipeline` project between runs.
 
 Database migrations in `prisma/migrations` are intentionally tracked. Create them with `npm run prisma:migrate:local` and commit them with the schema change.
 

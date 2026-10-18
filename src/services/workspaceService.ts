@@ -23,14 +23,19 @@ export const createWorkspace = async (id: string) => {
 export const removeWorkspace = async (id: string) =>
   fs.rm(workspacePath(id), { recursive: true, force: true });
 // Repository-controlled config (hooks, fsmonitor, textconv) must never run
-// with credentials or influence what is reviewed.
-const SAFE_GIT = "git -c core.hooksPath=/dev/null -c core.fsmonitor=false";
+// with credentials or influence what is reviewed. fileMode=false because
+// files are written from the host: on Windows bind mounts every file looks
+// executable, which would put a spurious mode change in each diff.
+const SAFE_GIT =
+  "git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.fileMode=false";
 const SAFE_GIT_ARGS = [
   "git",
   "-c",
   "core.hooksPath=/dev/null",
   "-c",
   "core.fsmonitor=false",
+  "-c",
+  "core.fileMode=false",
 ];
 // The token is read from the container env and sent as an HTTP header, so it
 // is never written to .git/config or placed on the docker command line.
@@ -62,12 +67,40 @@ const dockerArgs = (
   ...command,
 ];
 
-const execDocker = (args: string[], token?: string) =>
-  exec("docker", args, {
-    timeout: 300_000,
-    maxBuffer: 5_000_000,
-    env: token ? { ...process.env, GITHUB_TOKEN: token } : process.env,
-  });
+/**
+ * execFile's error message is the command line plus stderr only; failures
+ * need the exit status and stdout too (npm prints test failures there).
+ */
+const dockerFailure = (error: unknown, token?: string) => {
+  const failure = error as {
+    code?: unknown;
+    signal?: unknown;
+    killed?: boolean;
+    stdout?: string;
+    stderr?: string;
+  };
+  const tail = (text = "") =>
+    (token ? text.split(token).join("***") : text).trim().slice(-4000) ||
+    "(empty)";
+  const status = failure.killed
+    ? `killed by ${failure.signal ?? "timeout"}`
+    : `exit code ${failure.code ?? "unknown"}`;
+  return new Error(
+    `docker run failed (${status})\nstderr:\n${tail(failure.stderr)}\nstdout:\n${tail(failure.stdout)}`,
+  );
+};
+
+const execDocker = async (args: string[], token?: string) => {
+  try {
+    return await exec("docker", args, {
+      timeout: 300_000,
+      maxBuffer: 5_000_000,
+      env: token ? { ...process.env, GITHUB_TOKEN: token } : process.env,
+    });
+  } catch (error) {
+    throw dockerFailure(error, token);
+  }
+};
 
 export const runDocker = async (
   id: string,

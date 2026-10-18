@@ -12,6 +12,7 @@ npm run build                   # prisma generate + tsc -> dist/
 npm run lint                    # eslint . --ext .ts  (lint:fix to autofix)
 npm test                        # build, then node:test over tests/*.test.js
 npm run verify                  # lint + test
+npm run test:e2e                # tests/e2e/* against a RUNNING server, env from .env.e2e (see .env.e2e.example)
 
 npm run prisma:migrate:local    # create/apply a migration against .env.local DB
 npm run prisma:migrate:deploy   # apply committed migrations (deploy)
@@ -25,6 +26,8 @@ npm run build && node --test tests/llmUtils.test.js
 ```
 
 New test files must be added to the explicit list in the `test` script in `package.json`. There is no Jest.
+
+`tests/e2e/` is separate: those suites call the HTTP API (and Trello/GitHub for setup and cleanup) instead of `dist/`, are not part of `npm test`, and skip themselves when their `E2E_*` variables are unset. Add new e2e files to the `test:e2e` script.
 
 ## Architecture
 
