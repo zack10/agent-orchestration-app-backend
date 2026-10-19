@@ -398,6 +398,7 @@ Defaults and comments are in `.env.example`; `src/config.ts` is the single place
 | `npm run verify` | Lint + unit tests |
 | `npm run test:e2e` | End-to-end suites against a running server |
 | `npm run test:e2e:smoke` | Only the credential-free smoke suite |
+| `npm run eval:coding` | Coding benchmark: how well the agent fixes real bugs (see below) |
 
 Run a single unit test file with `npm run build && node --test tests/auditFixes.test.js`. New test files must be added to the `test` script in `package.json`.
 
@@ -412,6 +413,31 @@ Run a single unit test file with `npm run build && node --test tests/auditFixes.
 | `executionPipeline` | `E2E_LLM_*`, `E2E_TRELLO_*`, `E2E_GITHUB_*` (server also needs the GitHub App and Docker) | Trello card → sync → plan approval (stale hash rejected) → run → diff bound to publish approval → draft PR → Trello comment |
 
 The execution suite creates a real Trello card and, unless `E2E_PUBLISH=false`, opens a draft PR, so point it at a throwaway repository. It deletes the card afterwards and, when `E2E_GITHUB_TOKEN` is set, closes the PR and deletes the branch (`E2E_KEEP_RESOURCES=true` keeps them). It reuses one `e2e-execution-pipeline` project between runs.
+
+### Coding benchmark
+
+The e2e suites prove the plumbing works; the benchmark measures whether the agent writes **correct** code. `tests/e2e/coding-scenarios/` holds a small clean JS project (`repo/`) and 8 scenarios, each with a ticket, the files that plant its bug, and a **hidden test** that never leaves this repository:
+
+| # | Scenario | Measures |
+| --- | --- | --- |
+| 01 | Off-by-one in pagination | Basic single-file fix |
+| 02 | Order total rounded down | Numeric edge cases |
+| 03 | `slugify` breaks on accents and padding | Edge-case handling |
+| 04 | Missing `await` | Async reasoning |
+| 05 | Currency ignored by invoice and money helper | Multi-file change |
+| 06 | Vague "contacts missing after import" ticket | Finding the right file |
+| 07 | Bug in a 30 KB file | The 20 KB context cut-off |
+| 08 | Impossible "send invoices to LegacyBill" ticket | Should end `BLOCKED` |
+
+Per run, the runner points the sandbox repo's `main` at the scenario's code, creates the Trello card, approves the plan, waits for a diff or `BLOCKED`, **rejects publishing** (no PR is opened), and grades the diff in a network-less Docker container: the repo's own tests, then the hidden test. Outcomes are *correct fix*, *wrong fix shipped* (a PR would have been opened but the hidden test fails, which is the key number), *correctly blocked*, *no fix* and *infrastructure failure*. It writes `docs/testing/coding-eval-<date>.md`, prints a row for the roadmap's results log, and restores `main` to the clean project.
+
+```bash
+npm run eval:coding -- --check            # setup check, no LLM calls
+npm run eval:coding -- --scenario 01      # one scenario
+npm run eval:coding -- --runs 3           # every scenario, 3 runs each
+```
+
+It needs the execution suite's variables plus `E2E_GITHUB_TOKEN` (Contents read/write on the sandbox repo), the server and Docker on the same machine (it reads the diff artifact from disk), and **it rewrites the sandbox repo's `main`**. `npm test` includes `tests/codingScenarios.test.js`, which checks every scenario is fair: the clean project passes everything, and each bug passes the repo's tests but fails its hidden test.
 
 ## Troubleshooting
 
@@ -465,7 +491,7 @@ artifacts/              approved diffs, one per execution
 - **One tracker, one source host.** Trello is the only issue tracker and GitHub the only source control. Trackers are pluggable (`IssueTrackerAdapter`); source control is not yet (AUDIT A2).
 - **Node/TypeScript repositories only**, verified through their npm scripts.
 - **Repository context is selected by file name.** The agent sees up to 12 files whose paths match ticket words, each cut at 20 KB, and returns whole files. Vague tickets and very large files are weak spots.
-- **The agent can modify existing tests.** Hidden acceptance tests are the planned guard (see the coding evaluation plan).
+- **The agent can modify existing tests.** The coding benchmark's hidden tests catch this when measuring; nothing blocks it in a normal run yet (Phase 2 of `docs/plans/AGENTIC_ROADMAP.md`).
 - **One HTTP connector**, not a full Model Context Protocol transport. Skills and MCP resources are stored and assignable but not yet included in prompts.
 - **Process-local** rate limiting and logs. Multi-instance deployments need a shared limiter (e.g. Redis), centralized logs, metrics and tracing.
 

@@ -10,7 +10,7 @@ The existing plumbing stays: Docker sandbox, LangGraph run graph, snapshot-bound
 
 | Phase | Problem it solves | How (concept) | Size | Status |
 | --- | --- | --- | --- | --- |
-| 0. Coding evaluation + prompt management | We can't tell whether the agent writes correct code, or whether a change made it better or worse. | A benchmark of 8 realistic bugs scored by hidden tests the agent never sees; prompts move to versioned files so every result is tied to the exact prompts used. | M | In progress (prompts done) |
+| 0. Coding evaluation + prompt management | We can't tell whether the agent writes correct code, or whether a change made it better or worse. | A benchmark of 8 realistic bugs scored by hidden tests the agent never sees; prompts move to versioned files so every result is tied to the exact prompts used. | M | Built; baseline run waiting on 3 decisions |
 | 1. Tool calling in the LLM layer | The LLM layer can only send text and get text back, so the model can't ask to do anything. | Add function calling to the Gemini, OpenAI and Anthropic providers behind one shared format. | M | Not started |
 | 2. Sandbox tools | The agent only sees files chosen by name, cut at 20 KB, and must rewrite whole files; it can also edit tests. | Give it safe tools inside the Docker sandbox (list, read, search, edit, run checks) with the safety rules enforced in each tool, and log every call. | M | Not started |
 | 3. Agent loop | The agent gets one shot per attempt and can't explore, check its work or change course. | A loop where the model picks a tool, sees the result and decides the next step, until it finishes or hits a step/token/time budget; the existing checks still run after it. | L | Not started |
@@ -56,10 +56,11 @@ Found while reviewing the code after the first passing end-to-end run (draft PR 
 
 ### Design
 
-- **Benchmark repo:** turn `zack10/agent-orchestration-test` into a small real JS project. Modules: pricing, pagination, text utils, a small CSV parser, an async service. Tests use `node:test` with no dependencies, so `npm ci` is instant and verification works with `--network none`.
-- **One branch per scenario** (`scenario/01-…`), each starting from a known bug. Before each run, the harness points `main` at that branch. This rewrites `main`, which is only acceptable because the repo is a throwaway sandbox.
-- **Hidden acceptance tests** live in this repo (`tests/e2e/coding-scenarios/<id>/`), never in the sandbox repo, so the agent cannot see or game them.
-- **Harness flow per run:** set up the scenario → create the Trello card → approve the plan → wait for the diff → approve publish → clone the PR branch in Docker → run the hidden test and the repo's own tests → inspect the diff → close the PR and delete the branch → record the result.
+- **Benchmark repo:** a small real JS project (`tests/e2e/coding-scenarios/repo/`): pagination, pricing, text utils, a CSV contact import, invoices and a money helper, an async user service, and a 30 KB shipping-rates module. Tests use `node:test` with no dependencies, so `npm ci` is instant and verification works with `--network none`.
+- **Scenarios are sources in this repo, not branches.** Each `tests/e2e/coding-scenarios/NN-*/` has `scenario.json` (ticket, expected files), `bug/` (files that plant the bug over the clean project) and `hidden.test.js`. Before each run, the runner commits the scenario's code to the sandbox repo's `main` through the GitHub API, and afterwards it restores the clean project. This rewrites `main`, which is only acceptable because the repo is a throwaway sandbox.
+- **Hidden acceptance tests** never leave this repo, so the agent cannot see or game them.
+- **Every scenario is checked for fairness** in `npm test` (`tests/codingScenarios.test.js`): the clean project passes everything, and each bug passes the repo's own tests but fails its hidden test by an assertion.
+- **Harness flow per run:** commit the scenario to `main` → create the Trello card → approve the plan → wait for a diff or `BLOCKED` → **reject publishing** (reaching publish approval already means a PR would be opened, so no real PRs pile up) → grade the diff in a network-less Docker container: apply it, run the repo's own tests, then the hidden test → record the result.
 
 ### Scenarios
 
@@ -80,14 +81,17 @@ Each run is recorded with outcome, attempts used, duration, LLM calls and tokens
 
 - **Correct fix**: a PR was opened and the hidden test passes.
 - **Wrong fix shipped**: a PR was opened but the hidden test fails. **This is the key number.** It is what a human reviewer would have to catch.
-- **Correctly blocked**: no PR on an impossible ticket, or a justified give-up.
+- **Correctly blocked**: no PR on an impossible ticket.
+- **No fix (blocked)**: the run gave up on a fixable ticket. Not harmful, but not a success.
 - **Infrastructure failure**: Docker, rate limit or crash; counted separately so it doesn't skew the coding numbers.
+
+Tokens are not recorded yet; the pipeline starts tracking usage in Phase 3.
 
 ### Open decisions (needed before starting)
 
 - [ ] OK to rewrite `main` on `zack10/agent-orchestration-test` before each scenario? (Alternative: one sandbox repo per scenario; slower to set up.)
-- [ ] Model and budget: 24 runs (8 scenarios × 3) at roughly 5–10 LLM calls each is 120–240 calls, far above the Gemini free tier (20 requests/day per model). Choose: a paid key, spreading runs over several days, or starting with 8 runs (1 per scenario).
-- [ ] Provide `E2E_GITHUB_TOKEN`: a fine-grained PAT for the sandbox repo with *Contents* and *Pull requests* read/write (used to reset `main`, read PR branches, and close PRs).
+- [ ] Model and budget: 24 runs (8 scenarios × 3) at roughly 3–8 LLM calls each is about 70–190 calls, far above the Gemini free tier (20 requests/day per model). Choose: a paid key, spreading runs over several days (`--scenario`), or starting with 8 runs (1 per scenario).
+- [ ] Provide `E2E_GITHUB_TOKEN`: a fine-grained PAT for the sandbox repo only, with *Contents* read/write (used to commit each scenario to `main`). *Pull requests* read/write is optional; it lets the execution e2e suite close its PRs. Check it with `npm run eval:coding -- --check`.
 
 ### Prompt management
 
@@ -102,12 +106,12 @@ The benchmark only means something if every result is tied to the exact prompts 
 
 - [x] Move the 5 execution-graph prompts to versioned prompt files, unchanged in wording, with a small loader and fill-in variables (`src/prompts/`; the task prompt is folded into `implement.v1`, and the FILE format is a shared fragment `file-format.v1`)
 - [x] Split each into a system and a user part; providers already accept `system` (`LLMService.generateContent`)
-- [ ] Record prompt versions per attempt (execution event payload) and in each benchmark report (events done: `promptVersions` on `GRAPH_CONTEXT_LOADED` and `GRAPH_ATTEMPT_STARTED`, `promptVersion` on each LLM step's event; the report part comes with the runner)
+- [x] Record prompt versions per attempt (execution event payload) and in each benchmark report (`promptVersions` on `GRAPH_CONTEXT_LOADED` and `GRAPH_ATTEMPT_STARTED`, `promptVersion` on each LLM step's event; the report header lists them)
 - [x] Unit test: the loader fills every variable and fails loudly on a missing one (`tests/prompts.test.js`, which also proves v1 keeps the old wording)
-- [ ] Build the benchmark repo content and the 8 scenario branches
-- [ ] `tests/e2e/coding-scenarios/<id>/` with ticket text, expected files and hidden test for each scenario
-- [ ] Runner `npm run eval:coding` (reuses `tests/e2e/helpers.js`) that writes `docs/testing/coding-eval-<date>.md`
-- [ ] Run the baseline (single-shot agent) and record it in the results log
+- [x] Build the benchmark repo content and the 8 scenarios (as sources here instead of branches; see Design)
+- [x] `tests/e2e/coding-scenarios/<id>/` with ticket text, expected files and hidden test for each scenario, plus the fairness check in `npm test`
+- [x] Runner `npm run eval:coding` (reuses `tests/e2e/helpers.js` and the new `tests/e2e/pipeline.js`) that writes `docs/testing/coding-eval-<date>.md`; `--check` verifies the setup without LLM calls. The grader was checked against known-good and known-bad diffs; a full run is still pending
+- [ ] Run the baseline (single-shot agent) and record it in the results log (**blocked on the open decisions above**)
 
 **Done when:** prompts live in versioned files, and a baseline report exists, tied to those prompt versions, with per-scenario outcomes and an overall pass rate and wrong-fix-shipped rate.
 
