@@ -10,7 +10,7 @@ The existing plumbing stays: Docker sandbox, LangGraph run graph, snapshot-bound
 
 | Phase | Problem it solves | How (concept) | Size | Status |
 | --- | --- | --- | --- | --- |
-| 0. Coding evaluation + prompt management | We can't tell whether the agent writes correct code, or whether a change made it better or worse. | A benchmark of 8 realistic bugs scored by hidden tests the agent never sees; prompts move to versioned files so every result is tied to the exact prompts used. | M | Not started |
+| 0. Coding evaluation + prompt management | We can't tell whether the agent writes correct code, or whether a change made it better or worse. | A benchmark of 8 realistic bugs scored by hidden tests the agent never sees; prompts move to versioned files so every result is tied to the exact prompts used. | M | In progress (prompts done) |
 | 1. Tool calling in the LLM layer | The LLM layer can only send text and get text back, so the model can't ask to do anything. | Add function calling to the Gemini, OpenAI and Anthropic providers behind one shared format. | M | Not started |
 | 2. Sandbox tools | The agent only sees files chosen by name, cut at 20 KB, and must rewrite whole files; it can also edit tests. | Give it safe tools inside the Docker sandbox (list, read, search, edit, run checks) with the safety rules enforced in each tool, and log every call. | M | Not started |
 | 3. Agent loop | The agent gets one shot per attempt and can't explore, check its work or change course. | A loop where the model picks a tool, sees the result and decides the next step, until it finishes or hits a step/token/time budget; the existing checks still run after it. | L | Not started |
@@ -100,10 +100,10 @@ The benchmark only means something if every result is tied to the exact prompts 
 
 ### Tasks
 
-- [ ] Move the 5 execution-graph prompts to versioned prompt files, unchanged in wording, with a small loader and fill-in variables
-- [ ] Split each into a system and a user part; providers already accept `system` (`LLMService.generateContent`)
-- [ ] Record prompt versions per attempt (execution event payload) and in each benchmark report
-- [ ] Unit test: the loader fills every variable and fails loudly on a missing one
+- [x] Move the 5 execution-graph prompts to versioned prompt files, unchanged in wording, with a small loader and fill-in variables (`src/prompts/`; the task prompt is folded into `implement.v1`, and the FILE format is a shared fragment `file-format.v1`)
+- [x] Split each into a system and a user part; providers already accept `system` (`LLMService.generateContent`)
+- [ ] Record prompt versions per attempt (execution event payload) and in each benchmark report (events done: `promptVersions` on `GRAPH_CONTEXT_LOADED` and `GRAPH_ATTEMPT_STARTED`, `promptVersion` on each LLM step's event; the report part comes with the runner)
+- [x] Unit test: the loader fills every variable and fails loudly on a missing one (`tests/prompts.test.js`, which also proves v1 keeps the old wording)
 - [ ] Build the benchmark repo content and the 8 scenario branches
 - [ ] `tests/e2e/coding-scenarios/<id>/` with ticket text, expected files and hidden test for each scenario
 - [ ] Runner `npm run eval:coding` (reuses `tests/e2e/helpers.js`) that writes `docs/testing/coding-eval-<date>.md`

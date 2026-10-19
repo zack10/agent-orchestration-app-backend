@@ -222,6 +222,8 @@ flowchart TD
     artifact --> done(["AWAITING_PUBLISH_APPROVAL"])
 ```
 
+The LLM steps' prompts are versioned files in `src/prompts/execution/` (e.g. `implement.v1.md`). Each has a system part (fixed instructions) and a user part (ticket details). The active versions are listed in `src/prompts/index.ts`, and each run records them in its execution events (`promptVersions`, `promptVersion`). To change wording, add a new version instead of editing a released one.
+
 The agent returns whole files in this format inside a JSON `actions` string; anything else is rejected and retried:
 
 ````text
@@ -434,6 +436,7 @@ src/
   routes/ controllers/  HTTP layer
   middleware/           auth, CORS errors, rate limit, validation, error handler
   schemas/              Zod request schemas
+  prompts/              versioned run-graph prompts (execution/*.vN.md) + loader
   services/
     executionService.ts     execution state machine + approvals
     executionWorker.ts      plan/run/publish consumers, leases, recovery
@@ -441,7 +444,7 @@ src/
     ingestionService.ts     tracker-neutral ticket ingestion
     integrationPollingService.ts
     workspaceService.ts     Docker clone/verify/diff/publish
-    agentGraph/             LangGraph run graph, repo context, diff review
+    agentGraph/             LangGraph run graph, repo context, repo policy, diff review
     llm/                    providers, retries, output errors
     taskQueueService.ts, agentRunner.ts, promptBuilder.ts   task pipeline
     rabbitMQService.ts      connection, subscribe with retry/dead-letter

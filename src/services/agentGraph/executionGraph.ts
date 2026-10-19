@@ -7,6 +7,11 @@ import prisma from "../../db";
 import { getBaseSha, getInstallationToken } from "../../integrations/githubApp";
 import { parseFileActions, writeActionsToRoot } from "../../utils/codeWriter";
 import { decrypt } from "../../utils/crypto";
+import {
+  EXECUTION_PROMPTS,
+  executionPromptFragment,
+  renderExecutionPrompt,
+} from "../../prompts";
 import { NonRetryableError } from "../../utils/safeError";
 import { parseAgentOutput } from "../../utils/llmUtils";
 import { hashSnapshot } from "../executionService";
@@ -26,7 +31,7 @@ import { RepositoryPolicy, checkRepositoryPolicy } from "./repoPolicy";
 
 const llm = new LLMService();
 const MAX_ATTEMPTS = 3;
-const FILE_BLOCK_FORMAT = `Each changed file is one block: a line "FILE: relative/path", then an opening fence line such as \`\`\`md, then the COMPLETE new file content, then a line containing only \`\`\`. Put all blocks in the JSON "actions" string.`;
+const FILE_BLOCK_FORMAT = executionPromptFragment("fileFormat");
 
 type VerificationResult = Awaited<ReturnType<typeof verifyWorkspace>>;
 type GraphRoute =
@@ -47,7 +52,6 @@ const ExecutionGraphState = Annotation.Root({
   agentProvider: Annotation<string | undefined>(),
   agentModel: Annotation<string | undefined>(),
   agentApiKey: Annotation<string | undefined>(),
-  prompt: Annotation<string | undefined>(),
   ticket: Annotation<string | undefined>(),
   repoContext: Annotation<RepoContext | undefined>(),
   internalPlan: Annotation<string>({
@@ -171,6 +175,7 @@ const loadExecutionContext = async (
     repositoryId: execution.repositoryId,
     workItemId: execution.workItemId,
     planTaskId: planTask.id,
+    promptVersions: EXECUTION_PROMPTS,
   });
 
   const agentConfig = agent.config as { apiKey?: string } | null;
@@ -187,7 +192,6 @@ const loadExecutionContext = async (
     agentModel: agent.model || "gemini-flash-latest",
     agentApiKey,
     ticket: `${execution.workItem.title}\n${execution.workItem.description ?? ""}`,
-    prompt: `Fix this Node/TypeScript bug in the checked-out repository. Ticket: ${execution.workItem.title}\n${execution.workItem.description ?? ""}\nReturn the required JSON output with FILE actions only. Do not change unrelated files.`,
   };
 };
 
@@ -209,26 +213,14 @@ const planChange = async (state: typeof ExecutionGraphState.State) => {
   if (!state.ticket || !state.repoContext) {
     throw new Error("Execution graph is missing planning context");
   }
+  const prompt = renderExecutionPrompt("plan", {
+    ticket: state.ticket,
+    repoContext: state.repoContext.summary,
+  });
   const raw = await llm.generateContent(
     state.agentProvider || "gemini",
     state.agentModel || "gemini-flash-latest",
-    {
-      user: `Create a concise internal implementation plan for this repository change. Do not write code yet.
-
-Ticket:
-${state.ticket}
-
-Repository context:
-${state.repoContext.summary}
-
-Return JSON only:
-{
-  "summary": "short plan",
-  "filesToEdit": ["relative/path.ts"],
-  "risk": "low|medium|high",
-  "testStrategy": ["script or check"]
-}`,
-    },
+    prompt,
     state.agentApiKey,
   );
   const parsed = parseJsonRecord(raw);
@@ -244,12 +236,13 @@ Return JSON only:
   );
   await graphEvent(state.executionId, "GRAPH_INTERNAL_PLAN_CREATED", {
     internalPlan,
+    promptVersion: prompt.version,
   });
   return { internalPlan };
 };
 
 const implementChange = async (state: typeof ExecutionGraphState.State) => {
-  if (!state.planTaskId || !state.prompt) {
+  if (!state.planTaskId || !state.ticket) {
     throw new Error("Execution graph is missing task context");
   }
 
@@ -264,25 +257,20 @@ const implementChange = async (state: typeof ExecutionGraphState.State) => {
   await graphEvent(state.executionId, "GRAPH_ATTEMPT_STARTED", {
     attemptId: attempt.id,
     attemptNumber,
+    promptVersions: EXECUTION_PROMPTS,
   });
 
   const raw = await llm.generateContent(
     state.agentProvider || "gemini",
     state.agentModel || "gemini-flash-latest",
-    {
-      user: `${state.prompt}
-
-Internal implementation plan:
-${state.internalPlan || "No internal plan was produced."}
-
-Repository context:
-${state.repoContext?.summary ?? "No repository context was collected."}
-
-Previous failure or review feedback:
-${state.lastFailure || "None"}
-
-Return JSON with an "actions" string containing FILE blocks only. ${FILE_BLOCK_FORMAT}`,
-    },
+    renderExecutionPrompt("implement", {
+      ticket: state.ticket,
+      internalPlan: state.internalPlan || "No internal plan was produced.",
+      repoContext:
+        state.repoContext?.summary ?? "No repository context was collected.",
+      lastFailure: state.lastFailure || "None",
+      fileBlockFormat: FILE_BLOCK_FORMAT,
+    }),
     state.agentApiKey,
   );
   const parsed = parseAgentOutput(raw);
@@ -411,28 +399,15 @@ const verifyChange = async (state: typeof ExecutionGraphState.State) => {
 };
 
 const analyzeFailure = async (state: typeof ExecutionGraphState.State) => {
+  const prompt = renderExecutionPrompt("analyze", {
+    ticket: state.ticket ?? "",
+    internalPlan: state.internalPlan,
+    lastFailure: state.lastFailure,
+  });
   const raw = await llm.generateContent(
     state.agentProvider || "gemini",
     state.agentModel || "gemini-flash-latest",
-    {
-      user: `Analyze this failed automated coding attempt and produce concise retry guidance.
-
-Ticket:
-${state.ticket ?? ""}
-
-Internal plan:
-${state.internalPlan}
-
-Failure or review feedback:
-${state.lastFailure}
-
-Return JSON only:
-{
-  "summary": "what failed",
-  "nextAttemptGuidance": "specific changes the next attempt should make",
-  "avoid": ["things to avoid"]
-}`,
-    },
+    prompt,
     state.agentApiKey,
   );
   const parsed = parseJsonRecord(raw);
@@ -446,7 +421,10 @@ Return JSON only:
     null,
     2,
   );
-  await graphEvent(state.executionId, "GRAPH_FAILURE_ANALYZED", { guidance });
+  await graphEvent(state.executionId, "GRAPH_FAILURE_ANALYZED", {
+    guidance,
+    promptVersion: prompt.version,
+  });
   return { lastFailure: guidance };
 };
 
@@ -472,33 +450,16 @@ const reviewDiff = async (state: typeof ExecutionGraphState.State) => {
     };
   }
 
+  const prompt = renderExecutionPrompt("review", {
+    ticket: state.ticket ?? "",
+    internalPlan: state.internalPlan,
+    changedFiles: files.join("\n"),
+    diff: diff.slice(0, 80_000),
+  });
   const raw = await llm.generateContent(
     state.agentProvider || "gemini",
     state.agentModel || "gemini-flash-latest",
-    {
-      user: `Review this diff before it is sent for human publish approval.
-
-Ticket:
-${state.ticket ?? ""}
-
-Internal plan:
-${state.internalPlan}
-
-Changed files:
-${files.join("\n")}
-
-Diff:
-${diff.slice(0, 80_000)}
-
-Return JSON only:
-{
-  "approved": true,
-  "issues": [],
-  "summary": "short review summary"
-}
-
-Reject if the diff does not address the ticket, changes unrelated files, adds secrets, or is unsafe.`,
-    },
+    prompt,
     state.agentApiKey,
   );
   const parsed = parseJsonRecord(raw);
@@ -516,6 +477,7 @@ Reject if the diff does not address the ticket, changes unrelated files, adds se
     await graphEvent(state.executionId, "GRAPH_DIFF_REVIEW_FAILED", {
       attemptId: state.attemptId,
       issues,
+      promptVersion: prompt.version,
     });
     return {
       lastFailure: feedback,
@@ -526,6 +488,7 @@ Reject if the diff does not address the ticket, changes unrelated files, adds se
   await graphEvent(state.executionId, "GRAPH_DIFF_REVIEW_PASSED", {
     attemptId: state.attemptId,
     summary: parsed.summary ?? "Diff reviewer approved the change.",
+    promptVersion: prompt.version,
   });
   return { route: "artifact" };
 };
