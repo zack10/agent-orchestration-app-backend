@@ -17,7 +17,7 @@
 |---|---|---|---|
 | Critical | 4 | **4** | 0 |
 | High | 10 | **10** | 0 |
-| Medium | 12 | 0 | 3 (M1, M3, M9) |
+| Medium | 12 | **4 (M2, M3, M5, M7)** | 3 (M1, M9, M12) |
 | Low | 10 | 1 (L10, not a bug) | 0 |
 | Cleanup / docs / tests | 6 | **2 (X3, X6)** | 1 (X5) |
 | Architecture | 2 | **1 (A1)** | 0 |
@@ -56,6 +56,15 @@
 - All previously uncommitted work (pre-existing changes + pass 1 fixes) committed in logical chunks; each commit was type-checked on its own (see the commit list in `git log main..chore/repo-hygiene`).
 - Docs reorganized under `docs/` (moved, not deleted); tool folders and `scratch/` ignored; personal roadmap excluded locally.
 - Not merged or pushed: review the branch, then merge into `main`.
+
+### Pass 4 — 2026-10-19: benchmark prerequisites (M2, M3, M5, M7)
+
+Fixed before Phase 0 of `docs/plans/AGENTIC_ROADMAP.md`, because each would skew the coding benchmark.
+- **M2:** every retry starts from a clean checkout (`resetWorkspace`: `git reset --hard` + `git clean -fd -e node_modules`).
+- **M3:** policy violations are a failed attempt with feedback (`agentGraph/repoPolicy.ts`), routed to `analyze_failure`, or `BLOCKED` on the last attempt.
+- **M5:** dotfiles (e.g. `.env`) no longer reach the repo context sent to the LLM; `.env.example` still does.
+- **M7:** the verification workspace is deleted when the run step ends (`KEEP_WORKSPACES=true` keeps it); on Linux, root-owned files are deleted from inside a container.
+- Build ✅ · lint ✅ · **36/36 tests ✅** (3 new in `tests/agentGraphHelpers.test.js`; the M5 test fails on the old code).
 
 ### Pass 3 — 2026-10-17: tracker adapter refactor (A1), branch `chore/repo-hygiene`
 
@@ -199,19 +208,19 @@
 **Remaining:**
 - [ ] Handle a PR that was closed/merged between retries; record publish sub-steps explicitly.
 
-### - [ ] M2 — Retries build on dirty workspace
-**Status:** TODO · **Fix ref:** —
+### - [x] M2 — Retries build on dirty workspace
+**Status:** DONE · **Fix ref:** pass 4
 **Where:** `src/services/agentGraph/executionGraph.ts` (analyze_failure → implement_change edge)
 **Problem:** Failed attempts' edits persist into the next attempt; the writer can't delete files. (Whole-run retries now re-clone; the in-graph retry loop still doesn't reset.)
 **Fix:**
-- [ ] `git reset --hard && git clean -fd` (excluding `node_modules`) before each `implement_change`.
+- [x] `git reset --hard && git clean -fd` (excluding `node_modules`) before each retry in `implement_change`.
 
-### - [ ] M3 — Policy violations crash instead of retrying
-**Status:** PARTIAL · **Fix ref:** pass 1
+### - [x] M3 — Policy violations crash instead of retrying
+**Status:** DONE · **Fix ref:** pass 1, pass 4
 **Where:** `src/services/agentGraph/executionGraph.ts` (`enforceRepositoryPolicy`)
 **Done in pass 1:** violations now throw `NonRetryableError`, so the execution fails fast to `FAILED` with the reason instead of hanging (C2).
 **Remaining:**
-- [ ] Return `{ lastFailure, route }` and route to `analyze_failure`/`block_execution` so the agent gets a chance to fix the violation.
+- [x] Return `{ lastFailure, route }` and route to `analyze_failure`/`block_execution` so the agent gets a chance to fix the violation.
 
 ### - [ ] M4 — Every Trello list move or edit spawns a new execution
 **Status:** TODO · **Fix ref:** —
@@ -219,11 +228,11 @@
 **Fix:**
 - [ ] Hash only `name` + `desc`; skip creating an execution if a non-terminal one exists for the work item.
 
-### - [ ] M5 — repoContext dotfile skip uses `&&` instead of `||`
-**Status:** TODO · **Fix ref:** —
+### - [x] M5 — repoContext dotfile skip uses `&&` instead of `||`
+**Status:** DONE · **Fix ref:** pass 4
 **Where:** `src/services/agentGraph/repoContext.ts:33`
 **Fix:**
-- [ ] Change to `||`; add a test.
+- [x] Change to `||`; add a test.
 
 ### - [ ] M6 — Long runs exceed RabbitMQ consumer timeout
 **Status:** TODO · **Fix ref:** —
@@ -232,11 +241,11 @@
 **Fix:**
 - [ ] Ack after claiming (the run is then driven by DB lease state), or raise the timeout per queue; use a channel per consumer.
 
-### - [ ] M7 — Workspaces never cleaned up
-**Status:** TODO · **Fix ref:** —
+### - [x] M7 — Workspaces never cleaned up
+**Status:** DONE · **Fix ref:** pass 4
 **Where:** `src/services/workspaceService.ts` (`removeWorkspace` used only before clone and for publish workspaces)
 **Fix:**
-- [ ] Remove the verification workspace on terminal states; run containers with `--user $(id -u):$(id -g)` on Linux.
+- [x] Remove the verification workspace when the run step ends. Instead of `--user` (which breaks `npm ci` as a non-root user without a writable `HOME`), root-owned files are deleted from inside a container when the host can't.
 
 ### - [ ] M8 — Outbox has no row locking
 **Status:** TODO · **Fix ref:** —
@@ -264,11 +273,11 @@
 - [ ] Select by explicit role/flag; error if ambiguous.
 
 ### - [ ] M12 — No LLM retry/backoff; approvals have no real actor
-**Status:** TODO · **Fix ref:** —
+**Status:** PARTIAL · **Fix ref:** `src/services/llm/retry.ts`
 **Where:** `src/services/llm/*`, `src/controllers/executionController.ts`
 **Note:** whole-run retries (C3) now absorb transient 429s at a coarse level.
 **Fix:**
-- [ ] Exponential backoff on 429/5xx/timeouts in `LLMService`.
+- [x] Exponential backoff on 429/503/529 in `LLMService` (honours `Retry-After`, fails fast on exhausted credits or long quota waits). Timeouts are not retried.
 - [ ] Per-user tokens or an actor bound to the token; record the real approver.
 
 ---

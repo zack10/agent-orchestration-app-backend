@@ -3,11 +3,21 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
+
+const execFileAsync = promisify(execFile);
 
 const { reviewDiffSafety } = require("../dist/services/agentGraph/diffReview");
 const {
   collectRepoContext,
 } = require("../dist/services/agentGraph/repoContext");
+const {
+  checkRepositoryPolicy,
+} = require("../dist/services/agentGraph/repoPolicy");
+const {
+  WORKSPACE_RESET_COMMANDS,
+} = require("../dist/services/workspaceService");
 
 test("diff review rejects added secrets", () => {
   const result = reviewDiffSafety(
@@ -41,4 +51,80 @@ test("repo context selects likely relevant files", async () => {
   assert.ok(context.packageScripts.includes("test"));
   assert.ok(context.selectedFiles.includes("src/trelloAdapter.ts"));
   assert.match(context.summary, /src\/trelloAdapter\.ts/);
+});
+
+test("M5: repo context skips dotfiles and excluded dirs but keeps .env.example", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-graph-"));
+  await fs.mkdir(path.join(root, "dist"), { recursive: true });
+  await fs.mkdir(path.join(root, ".github"), { recursive: true });
+  await fs.writeFile(path.join(root, ".env"), "SECRET=do-not-send\n");
+  await fs.writeFile(path.join(root, ".env.example"), "SECRET=\n");
+  await fs.writeFile(path.join(root, ".github", "ci.yml"), "on: push\n");
+  await fs.writeFile(path.join(root, "dist", "index.js"), "built\n");
+  await fs.writeFile(path.join(root, "index.js"), "source\n");
+
+  const context = await collectRepoContext(root, "Fix env handling");
+
+  assert.deepEqual(context.fileTree, [".env.example", "index.js"]);
+  assert.doesNotMatch(context.summary, /do-not-send/);
+});
+
+test("M3: repository policy returns retry feedback instead of throwing", () => {
+  assert.equal(checkRepositoryPolicy(["src/a.js"], {}), undefined);
+  assert.equal(checkRepositoryPolicy(["src/a.js"], null), undefined);
+
+  const protectedHit = checkRepositoryPolicy(
+    ["src/a.js", "package.json", ".github/workflows/ci.yml"],
+    {},
+  );
+  assert.match(protectedHit, /package\.json, \.github\/workflows\/ci\.yml/);
+  assert.doesNotMatch(protectedHit, /src\/a\.js/);
+
+  // Only a path or a folder prefix counts, not a name that merely starts with it.
+  assert.equal(
+    checkRepositoryPolicy(["package.json.bak", ".githubrc"], {}),
+    undefined,
+  );
+
+  const tooMany = checkRepositoryPolicy(["a", "b", "c"], { maxChangedFiles: 2 });
+  assert.match(tooMany, /touches 3 files; the limit is 2/);
+
+  const custom = checkRepositoryPolicy(["tests/a.test.js"], {
+    protectedPaths: ["tests"],
+  });
+  assert.match(custom, /tests\/a\.test\.js/);
+});
+
+test("M2: workspace reset drops edits and new files but keeps node_modules", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-reset-"));
+  const git = (...args) =>
+    execFileAsync("git", args, { cwd: root }).then((result) => result.stdout);
+  await git("init", "--quiet");
+  await git("config", "core.autocrlf", "false");
+  await fs.writeFile(path.join(root, ".gitignore"), "node_modules/\n");
+  await fs.writeFile(path.join(root, "index.js"), "original\n");
+  await git("add", ".");
+  await git(
+    "-c", "user.name=test", "-c", "user.email=test@localhost",
+    "commit", "--quiet", "-m", "base",
+  );
+
+  // A failed attempt: an edit, a new file, an intent-to-add entry (as
+  // changedFiles leaves behind) and a new folder.
+  await fs.writeFile(path.join(root, "index.js"), "broken\n");
+  await fs.writeFile(path.join(root, "added.js"), "new\n");
+  await fs.mkdir(path.join(root, "lib"));
+  await fs.writeFile(path.join(root, "lib", "helper.js"), "new\n");
+  await git("add", "-N", ".");
+  await fs.mkdir(path.join(root, "node_modules", "dep"), { recursive: true });
+  await fs.writeFile(path.join(root, "node_modules", "dep", "index.js"), "dep\n");
+
+  // Same commands the container runs, without the leading "git".
+  for (const command of WORKSPACE_RESET_COMMANDS) await git(...command.slice(1));
+
+  assert.equal(await fs.readFile(path.join(root, "index.js"), "utf8"), "original\n");
+  await assert.rejects(fs.access(path.join(root, "added.js")));
+  await assert.rejects(fs.access(path.join(root, "lib")));
+  await fs.access(path.join(root, "node_modules", "dep", "index.js"));
+  assert.equal(await git("status", "--porcelain"), "");
 });

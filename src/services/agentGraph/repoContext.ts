@@ -30,7 +30,7 @@ const normalizeRelativePath = (value: string) => value.replaceAll("\\", "/");
 const shouldSkipEntry = (entry: Dirent): boolean => {
   const isDotFile = entry.name.startsWith(".") && entry.name !== ".env.example";
   const isExcludedDir = entry.isDirectory() && EXCLUDED_DIRS.has(entry.name);
-  return isDotFile && isExcludedDir;
+  return isDotFile || isExcludedDir;
 };
 
 const safeReadText = async (filePath: string, maxBytes = MAX_FILE_BYTES) => {
