@@ -120,7 +120,7 @@ The two pipelines write to different folders. All three are gitignored.
 | Folder | Pipeline | What's in it |
 | --- | --- | --- |
 | `generated-code/<project>/` | Task pipeline | Files from an agent's `FILE` blocks in a task reply. This is the task's final output. |
-| `workspaces/<executionId>/` (`WORKSPACE_ROOT`) | Execution pipeline | A full clone of the target repo where the agent edits files and verification runs. It's a scratch copy, not the output. |
+| `workspaces/<executionId>/` (`WORKSPACE_ROOT`) | Execution pipeline | A full clone of the target repo where the agent edits files and verification runs. It's a scratch copy, not the output, and is deleted when the run step ends (set `KEEP_WORKSPACES=true` to keep it for debugging). |
 | `artifacts/<executionId>.diff` (`ARTIFACT_ROOT`) | Execution pipeline | The exact diff that was verified, reviewed and approved. This is what gets published. |
 
 Publishing never reads `workspaces/`. It clones the repository fresh, applies the `.diff` from `artifacts/`, and pushes, so the PR always contains exactly the approved bytes.
@@ -192,12 +192,12 @@ stateDiagram-v2
 ```
 
 - Runs hold a lease (`EXECUTION_LEASE_MS`) renewed by a heartbeat. If a worker dies, a sweep requeues the run once the lease expires.
-- Transient failures are retried; policy violations, a moved base branch, a changed diff, exhausted LLM credits or a long quota wait fail immediately.
+- Transient failures are retried; a moved base branch, a changed diff, exhausted LLM credits or a long quota wait fail immediately.
 - Trello gets a comment on plan, block, failure and PR creation.
 
 ### Inside a run
 
-The run step is a LangGraph state graph (`src/services/agentGraph/executionGraph.ts`). Each change gets up to 3 attempts; feedback from a failed attempt is fed into the next one.
+The run step is a LangGraph state graph (`src/services/agentGraph/executionGraph.ts`). Each change gets up to 3 attempts; feedback from a failed attempt is fed into the next one. Every retry starts from a clean checkout of the base commit, so it never builds on a failed attempt's edits.
 
 ```mermaid
 flowchart TD
@@ -208,8 +208,8 @@ flowchart TD
     impl -->|output parsed| policy["enforce_policy<br/>file count, protected paths"]
     impl -->|malformed output| impl
     impl -->|3rd malformed output| blocked
-    policy -->|violation| failed(["FAILED<br/>non-retryable"])
-    policy --> verify["verify_change<br/>npm scripts in Docker, network off"]
+    policy -->|violation| analyze
+    policy -->|allowed| verify["verify_change<br/>npm scripts in Docker, network off"]
     verify -->|pass| review["review_diff<br/>secret patterns + LLM review"]
     verify -->|fail| analyze["analyze_failure<br/>LLM: guidance for next attempt"]
     review -->|issues found| analyze
@@ -218,6 +218,7 @@ flowchart TD
     analyze -->|none left| blocked(["block_execution<br/>BLOCKED"])
     verify -->|3rd failure| blocked
     review -->|3rd failure| blocked
+    policy -->|3rd violation| blocked
     artifact --> done(["AWAITING_PUBLISH_APPROVAL"])
 ```
 
@@ -380,7 +381,7 @@ Behaviour worth knowing:
 | API access | `API_AUTH_TOKEN`, `API_AUTH_ACTOR`, `AUTH_DISABLED`, `CORS_ORIGINS`, `API_RATE_LIMIT_PER_MINUTE` |
 | LLM | `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `LLM_REQUEST_TIMEOUT_MS`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_RATE_LIMIT_RETRIES` |
 | Task pipeline | `TASK_MAX_ATTEMPTS`, `TASK_RETRY_DELAY_MS`, `TASK_LEASE_MS`, `GENERATED_CODE_MAX_FILES`, `GENERATED_CODE_MAX_FILE_BYTES`, `STORE_RAW_LLM_OUTPUT` |
-| Execution pipeline | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `INTEGRATION_POLL_INTERVAL_MS`, `EXECUTION_LEASE_MS`, `WORKSPACE_ROOT`, `ARTIFACT_ROOT` |
+| Execution pipeline | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `INTEGRATION_POLL_INTERVAL_MS`, `EXECUTION_LEASE_MS`, `WORKSPACE_ROOT`, `KEEP_WORKSPACES`, `ARTIFACT_ROOT` |
 | Messaging | `CONSUMER_MAX_ATTEMPTS`, `CONSUMER_RETRY_DELAY_MS` |
 | HTTP connector | `MCP_HTTP_ALLOWED_HOSTS`, `MCP_HTTP_ALLOW_PRIVATE_IPS`, `MCP_HTTP_TIMEOUT_MS`, `MCP_HTTP_MAX_RESPONSE_BYTES` |
 
@@ -452,7 +453,7 @@ docs/                   plans, specs, testing, guides, history
 
 # created at runtime (gitignored)
 generated-code/         task pipeline output
-workspaces/             execution scratch clones, one per execution
+workspaces/             execution scratch clones, deleted after each run step
 artifacts/              approved diffs, one per execution
 ```
 
@@ -462,7 +463,6 @@ artifacts/              approved diffs, one per execution
 - **Node/TypeScript repositories only**, verified through their npm scripts.
 - **Repository context is selected by file name.** The agent sees up to 12 files whose paths match ticket words, each cut at 20 KB, and returns whole files. Vague tickets and very large files are weak spots.
 - **The agent can modify existing tests.** Hidden acceptance tests are the planned guard (see the coding evaluation plan).
-- **Workspaces are not cleaned up.** Each execution leaves its full clone in `workspaces/`; the folder is only wiped before a re-clone. Delete old folders by hand for now; nothing reads them after the diff artifact is stored.
 - **One HTTP connector**, not a full Model Context Protocol transport. Skills and MCP resources are stored and assignable but not yet included in prompts.
 - **Process-local** rate limiting and logs. Multi-instance deployments need a shared limiter (e.g. Redis), centralized logs, metrics and tracing.
 

@@ -15,11 +15,14 @@ import {
   changedFiles,
   cloneGithubWorkspace,
   gitDiff,
+  removeWorkspace,
+  resetWorkspace,
   verifyWorkspace,
   workspacePath,
 } from "../workspaceService";
 import { reviewDiffSafety } from "./diffReview";
 import { RepoContext, collectRepoContext } from "./repoContext";
+import { RepositoryPolicy, checkRepositoryPolicy } from "./repoPolicy";
 
 const llm = new LLMService();
 const MAX_ATTEMPTS = 3;
@@ -31,6 +34,7 @@ type GraphRoute =
   | "blocked"
   | "review"
   | "implemented"
+  | "verify"
   | "artifact"
   | "skipped"
   | undefined;
@@ -313,6 +317,9 @@ Return JSON with an "actions" string containing FILE blocks only. ${FILE_BLOCK_F
     };
   }
 
+  // Each attempt starts from the base commit, so a retry never builds on a
+  // failed attempt's edits (and files it added don't linger).
+  if (attemptNumber > 1) await resetWorkspace(state.executionId);
   writeActionsToRoot(
     parsed.actions,
     path.resolve(config.workspaceRoot, state.executionId),
@@ -333,32 +340,31 @@ const enforceRepositoryPolicy = async (
     include: { repository: true },
   });
   const files = await changedFiles(state.executionId);
-  const policy = execution.repository.executionPolicy as {
-    maxChangedFiles?: number;
-    protectedPaths?: string[];
-  };
-  const protectedPaths = policy.protectedPaths ?? [
-    "package.json",
-    "package-lock.json",
-    ".github",
-  ];
+  const violation = checkRepositoryPolicy(
+    files,
+    execution.repository.executionPolicy as RepositoryPolicy | null,
+  );
 
-  if (files.length > (policy.maxChangedFiles ?? 20)) {
-    throw new NonRetryableError("Change exceeds repository file-count policy");
-  }
-  if (
-    files.some((file) =>
-      protectedPaths.some(
-        (protectedPath) =>
-          file === protectedPath || file.startsWith(`${protectedPath}/`),
-      ),
-    )
-  ) {
-    throw new NonRetryableError("Change modifies a protected repository path");
+  if (violation) {
+    if (!state.attemptId) throw new Error("Execution graph is missing attempt");
+    await prisma.taskAttempt.update({
+      where: { id: state.attemptId },
+      data: { status: "FAILED", error: violation, completedAt: new Date() },
+    });
+    await graphEvent(state.executionId, "GRAPH_POLICY_FAILED", {
+      attemptId: state.attemptId,
+      attemptNumber: state.attemptNumber,
+      files,
+      reason: violation,
+    });
+    return {
+      lastFailure: violation,
+      route: (canRetry(state) ? "retry" : "blocked") as GraphRoute,
+    };
   }
 
   await graphEvent(state.executionId, "GRAPH_POLICY_PASSED", { files });
-  return {};
+  return { route: "verify" as GraphRoute };
 };
 
 const verifyChange = async (state: typeof ExecutionGraphState.State) => {
@@ -618,7 +624,11 @@ const graph = new StateGraph(ExecutionGraphState)
     retry: "implement_change",
     blocked: "block_execution",
   })
-  .addEdge("enforce_policy", "verify_change")
+  .addConditionalEdges("enforce_policy", routeAfterVerification, {
+    verify: "verify_change",
+    retry: "analyze_failure",
+    blocked: "block_execution",
+  })
   .addConditionalEdges("verify_change", routeAfterVerification, {
     retry: "analyze_failure",
     blocked: "block_execution",
@@ -638,5 +648,12 @@ const graph = new StateGraph(ExecutionGraphState)
   .compile();
 
 export const runExecutionGraph = async (executionId: string) => {
-  await graph.invoke({ executionId });
+  try {
+    await graph.invoke({ executionId });
+  } finally {
+    // The approved diff is stored under ARTIFACT_ROOT and publishing uses a
+    // fresh clone, so the verification workspace is not needed afterwards.
+    // A retried run re-clones from scratch.
+    if (!config.keepWorkspaces) await removeWorkspace(executionId);
+  }
 };

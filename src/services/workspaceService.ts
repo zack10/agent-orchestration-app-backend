@@ -20,8 +20,27 @@ export const createWorkspace = async (id: string) => {
   await fs.mkdir(root, { recursive: true });
   return root;
 };
-export const removeWorkspace = async (id: string) =>
-  fs.rm(workspacePath(id), { recursive: true, force: true });
+export const removeWorkspace = async (id: string) => {
+  const root = workspacePath(id);
+  try {
+    await fs.rm(root, { recursive: true, force: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EACCES" && code !== "EPERM") throw error;
+    // On Linux the container writes as root, so the host user may not be
+    // able to delete those files; delete them from inside a container.
+    await execDocker(
+      dockerArgs(root, false, false, [
+        "find",
+        "/workspace",
+        "-mindepth",
+        "1",
+        "-delete",
+      ]),
+    );
+    await fs.rm(root, { recursive: true, force: true });
+  }
+};
 // Repository-controlled config (hooks, fsmonitor, textconv) must never run
 // with credentials or influence what is reviewed. fileMode=false because
 // files are written from the host: on Windows bind mounts every file looks
@@ -131,6 +150,18 @@ export const cloneGithubWorkspace = async (
   const root = await createWorkspace(id);
   const script = `${AUTH_GIT} clone https://github.com/${owner}/${repo}.git . && ${SAFE_GIT} checkout ${sha} && npm ci --ignore-scripts`;
   await execDocker(dockerArgs(root, true, true, ["sh", "-c", script]), token);
+};
+/**
+ * Commands that return a clone to its checked-out commit: tracked changes,
+ * intent-to-add entries and new files are dropped. Ignored files (installed
+ * node_modules) are kept so retries don't reinstall dependencies.
+ */
+export const WORKSPACE_RESET_COMMANDS = [
+  [...SAFE_GIT_ARGS, "reset", "--hard", "--quiet"],
+  [...SAFE_GIT_ARGS, "clean", "-fd", "--quiet", "-e", "node_modules"],
+];
+export const resetWorkspace = async (id: string) => {
+  for (const command of WORKSPACE_RESET_COMMANDS) await runDocker(id, command);
 };
 export const gitDiff = async (id: string) => {
   await runDocker(id, [...SAFE_GIT_ARGS, "add", "-N", "."]);
