@@ -5,7 +5,7 @@ import path from "node:path";
 import { config } from "../../config";
 import prisma from "../../db";
 import { getBaseSha, getInstallationToken } from "../../integrations/githubApp";
-import { parseFileActions, writeActionsToRoot } from "../../utils/codeWriter";
+import { writeActionsToRoot } from "../../utils/codeWriter";
 import { decrypt } from "../../utils/crypto";
 import {
   EXECUTION_PROMPTS,
@@ -26,6 +26,7 @@ import {
   workspacePath,
 } from "../workspaceService";
 import { reviewDiffSafety } from "./diffReview";
+import { fileActionsError } from "./outputFormat";
 import { RepoContext, collectRepoContext } from "./repoContext";
 import { RepositoryPolicy, checkRepositoryPolicy } from "./repoPolicy";
 
@@ -277,12 +278,7 @@ const implementChange = async (state: typeof ExecutionGraphState.State) => {
 
   // A malformed reply is a failed attempt the model can correct, not a crash
   // of the whole run. Parsing is pure, so nothing has been written yet.
-  let formatError: string | undefined;
-  try {
-    parseFileActions(parsed.actions);
-  } catch (error) {
-    formatError = error instanceof Error ? error.message : String(error);
-  }
+  const formatError = fileActionsError(raw, parsed.actions);
   if (formatError) {
     await prisma.taskAttempt.update({
       where: { id: attempt.id },

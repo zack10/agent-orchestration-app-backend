@@ -205,7 +205,8 @@ const runScenario = async (fixtures, scenario, runNumber) => {
       const artifact = execution.artifacts.find((candidate) => candidate.type === "DIFF");
       // The runner shares the server's disk; the hash proves it is the approved diff.
       const diff = fs.readFileSync(artifact.storagePath, "utf8");
-      if (crypto.createHash("sha256").update(diff).digest("hex") !== artifact.sha256)
+      // Same formula as hashSnapshot in src/services/executionService.ts.
+      if (crypto.createHash("sha256").update(JSON.stringify(diff)).digest("hex") !== artifact.sha256)
         throw new Error("diff artifact does not match its recorded sha256");
       // Never open a PR during the benchmark.
       await api("POST", `/api/executions/${result.executionId}/approvals/publish`, {
@@ -364,7 +365,8 @@ const main = async () => {
   }
 
   const report = writeReport(results, {
-    date: new Date().toISOString().slice(0, 10),
+    // Local calendar date (the "sv" locale formats as YYYY-MM-DD).
+    date: new Date().toLocaleDateString("sv"),
     commit: commit.trim(),
     runs: options.runs,
     durationMs: Date.now() - started,

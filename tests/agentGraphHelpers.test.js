@@ -128,3 +128,20 @@ test("M2: workspace reset drops edits and new files but keeps node_modules", asy
   await fs.access(path.join(root, "node_modules", "dep", "index.js"));
   assert.equal(await git("status", "--porcelain"), "");
 });
+
+test("implement replies without usable FILE blocks are rejected with a specific reason", () => {
+  const { fileActionsError } = require("../dist/services/agentGraph/outputFormat");
+  const { parseAgentOutput } = require("../dist/utils/llmUtils");
+  const check = (raw) => fileActionsError(raw, parseAgentOutput(raw).actions);
+
+  // The shape Gemini returned in the first benchmark run.
+  const arrayReply = '```json\n{\n  "actions": [\n    { "file": "src/pagination.js", "content": "x" }\n  ]\n}\n```';
+  assert.match(check(arrayReply), /must be one string of FILE blocks, not an array/);
+  assert.match(check('{"actions": {"file": "a.js"}}'), /not object/);
+  assert.match(check('{"actions": ""}'), /no FILE blocks/);
+  assert.match(check("I could not find the bug."), /no FILE blocks/);
+  assert.match(check(JSON.stringify({ actions: "FILE: a.js\nno fence" })), /missing an opening fence/);
+
+  const good = JSON.stringify({ actions: "FILE: src/a.js\n```js\nmodule.exports = 1;\n```" });
+  assert.equal(check(good), undefined);
+});
