@@ -10,8 +10,8 @@ The existing plumbing stays: Docker sandbox, LangGraph run graph, snapshot-bound
 
 | Phase | Problem it solves | How (concept) | Size | Status |
 | --- | --- | --- | --- | --- |
-| 0. Coding evaluation + prompt management | We can't tell whether the agent writes correct code, or whether a change made it better or worse. | A benchmark of 8 realistic bugs scored by hidden tests the agent never sees; prompts move to versioned files so every result is tied to the exact prompts used. | M | Built; baseline run waiting on 3 decisions |
-| 1. Tool calling in the LLM layer | The LLM layer can only send text and get text back, so the model can't ask to do anything. | Add function calling to the Gemini, OpenAI and Anthropic providers behind one shared format. | M | Not started |
+| 0. Coding evaluation + prompt management | We can't tell whether the agent writes correct code, or whether a change made it better or worse. | A benchmark of 8 realistic bugs scored by hidden tests the agent never sees; prompts move to versioned files so every result is tied to the exact prompts used. | M | Built; baseline running on the free tier (~2 scenarios/day) |
+| 1. Provider registry + tool calling in the LLM layer | Each new LLM needs its own code and edits in several places, and the LLM layer can only send text and get text back, so the model can't ask to do anything. | One generic OpenAI-compatible provider configured per vendor (new vendors need configuration only), a single provider registry, then function calling behind one shared format. | M–L | Not started |
 | 2. Sandbox tools | The agent only sees files chosen by name, cut at 20 KB, and must rewrite whole files; it can also edit tests. | Give it safe tools inside the Docker sandbox (list, read, search, edit, run checks) with the safety rules enforced in each tool, and log every call. | M | Not started |
 | 3. Agent loop | The agent gets one shot per attempt and can't explore, check its work or change course. | A loop where the model picks a tool, sees the result and decides the next step, until it finishes or hits a step/token/time budget; the existing checks still run after it. | L | Not started |
 | 4. Parallel executions (several tickets at once) | Tickets run one after another, so one slow ticket holds up the rest. | Allow several runs at once with limits on runs, CPU/memory and LLM rate, keep each run isolated, and let workers scale as separate processes. | M–L | Not started |
@@ -32,6 +32,7 @@ Found while reviewing the code after the first passing end-to-end run (draft PR 
 | No way to measure coding quality; one easy pass proves plumbing, not ability | Only e2e ticket is "append a line to README" against a repo whose `test` script just echoes | Phase 0 |
 | Execution prompts are hard-coded, unversioned and not recorded per run, so a prompt change can't be linked to a result | 5 inline prompt strings in `executionGraph.ts` (task, plan, implement, analyze, review); no system prompt; the agent's `baseInstructions` is ignored by this pipeline (only `promptBuilder.ts` uses it) | Phases 0, 5 |
 | Skills are stored and assignable but have no effect | `Skill` model and `POST /api/skills/assign` exist; no prompt in either pipeline reads them | Phase 6 |
+| Every new LLM needs its own code; only one OpenAI-compatible endpoint can be configured at a time | Provider list hard-coded in `LLMService.ts`, 4 Zod enums, `llmRoutes.ts`; single global `OPENAI_BASE_URL`; `listModels` keeps only `gpt-*`/`o1-*` | Phase 1 |
 | No tool calling: the model never decides what to read, search or run | `implement_change` sends one prompt and gets whole files back | Phases 1–3 |
 | Repo context is chosen by **file name** only | `repoContext.ts` scores paths by ticket words, max 12 files | Phases 2, 6 |
 | Files are cut at **20 KB** but the agent returns **whole files** | `MAX_FILE_BYTES` in `repoContext.ts` + whole-file `FILE` blocks; large files can be silently truncated | Phase 2 |
@@ -89,9 +90,9 @@ Tokens are not recorded yet; the pipeline starts tracking usage in Phase 3.
 
 ### Open decisions (needed before starting)
 
-- [ ] OK to rewrite `main` on `zack10/agent-orchestration-test` before each scenario? (Alternative: one sandbox repo per scenario; slower to set up.)
-- [ ] Model and budget: 24 runs (8 scenarios × 3) at roughly 3–8 LLM calls each is about 70–190 calls, far above the Gemini free tier (20 requests/day per model). Choose: a paid key, spreading runs over several days (`--scenario`), or starting with 8 runs (1 per scenario).
-- [ ] Provide `E2E_GITHUB_TOKEN`: a fine-grained PAT for the sandbox repo only, with *Contents* read/write (used to commit each scenario to `main`). *Pull requests* read/write is optional; it lets the execution e2e suite close its PRs. Check it with `npm run eval:coding -- --check`.
+- [x] OK to rewrite `main` on `zack10/agent-orchestration-test` before each scenario? (Alternative: one sandbox repo per scenario; slower to set up.) **Yes.**
+- [x] Model and budget: 24 runs (8 scenarios × 3) at roughly 3–8 LLM calls each is about 70–190 calls, far above the Gemini free tier (20 requests/day per model). Choose: a paid key, spreading runs over several days (`--scenario`), or starting with 8 runs (1 per scenario). **Decided 2026-10-24: free tier (`gemini-flash-lite-latest`), 1 run per scenario, about 2 scenarios a day. The 8 × 3 run waits for a paid key, and switching model then starts a new baseline row.**
+- [x] Provide `E2E_GITHUB_TOKEN`: a fine-grained PAT for the sandbox repo only, with *Contents* read/write (used to commit each scenario to `main`). *Pull requests* read/write is optional; it lets the execution e2e suite close its PRs. Check it with `npm run eval:coding -- --check`. **Done; `--check` passes.**
 
 ### Prompt management
 
@@ -111,28 +112,51 @@ The benchmark only means something if every result is tied to the exact prompts 
 - [x] Build the benchmark repo content and the 8 scenarios (as sources here instead of branches; see Design)
 - [x] `tests/e2e/coding-scenarios/<id>/` with ticket text, expected files and hidden test for each scenario, plus the fairness check in `npm test`
 - [x] Runner `npm run eval:coding` (reuses `tests/e2e/helpers.js` and the new `tests/e2e/pipeline.js`) that writes `docs/testing/coding-eval-<date>.md`; `--check` verifies the setup without LLM calls. The grader was checked against known-good and known-bad diffs; a full run is still pending
-- [ ] Run the baseline (single-shot agent) and record it in the results log (**blocked on the open decisions above**)
+- [ ] Run the baseline (single-shot agent, 1 run per scenario on the free tier) and record it in the results log (in progress: 4/8 scenarios, all correct fixes; reports `docs/testing/coding-eval-2026-10-24*.md`. Next: 05–06, then 07–08)
+- [ ] After the baseline, first prompt experiment: `implement.v2` asking explicitly for `actions` as one string. On `gemini-flash-lite-latest`, attempt 1 of every baseline run so far was rejected because `actions` came back as an array, costing one attempt and one LLM call per scenario
 
 **Done when:** prompts live in versioned files, and a baseline report exists, tied to those prompt versions, with per-scenario outcomes and an overall pass rate and wrong-fix-shipped rate.
 
 ---
 
-## Phase 1: Tool calling in the LLM layer
+## Phase 1: Provider registry + tool calling in the LLM layer
 
-*Teaches: function calling, tool schemas, provider differences.*
+*Teaches: function calling, tool schemas, provider differences, configuration-driven integrations.*
 
-Today providers only offer `generateContent(prompt) → text` (`src/services/llm/`).
+Today providers only offer `generateContent(prompt) → text` (`src/services/llm/`), and adding one means code in several places: a provider class, registration and the `ProviderKey` type in `LLMService.ts`, four `z.enum(["gemini", "openai", "anthropic"])` in `schemas/index.ts`, and the list in `routes/llmRoutes.ts`. `OpenAIProvider` can already reach an OpenAI-compatible API, but only one at a time (a single global `OPENAI_BASE_URL`), and its `listModels` hides any model not named `gpt-*`/`o1-*`.
+
+**Goal:** adding an LLM is configuration, not code. Most vendors (Mistral, Groq, DeepSeek, xAI, Together, Fireworks, OpenRouter, and local Ollama/vLLM/LM Studio) speak the OpenAI `/chat/completions` format, so one generic provider covers them. Native classes are written only for APIs that really differ (Gemini and Anthropic today; Bedrock, Vertex or Cohere only if needed). The registry is done **before** tool calling, so every compatible vendor gets tool calling from the single OpenAI mapping.
+
+### Design
+
+- **Provider profiles:** each OpenAI-compatible vendor is a configuration entry, e.g. `{ "key": "groq", "baseUrl": "https://api.groq.com/openai/v1", "apiKeyEnv": "GROQ_API_KEY", "supportsTools": true }`. Built-in profiles cover OpenAI; others come from config (`LLM_PROVIDERS`, parsed and validated in `src/config.ts`).
+- **One registry is the source of truth:** provider keys for Zod validation, `/api/llm`, `LLMService` routing and the default provider all come from it. No hard-coded provider lists elsewhere.
+- **Base URLs come only from server configuration**, never from API callers or an agent's `config`: otherwise anyone who can create an agent could make the server send its key to any host (same SSRF concern as the MCP connector). Agents choose a provider key and a model, nothing else.
+- **Capabilities per profile** (`supportsTools`, `supportsSystemPrompt`): compatible servers differ, and callers that need tools (Phase 3) get a clear error instead of a silent text-only reply.
+- **Same guarantees for every provider:** rate-limit retries (`retry.ts`), truncation/refusal/empty detection (`LLMOutputError`), `describeError` logging.
 
 ### Tasks
 
+**Provider registry**
+
+- [ ] Turn `OpenAIProvider` into a generic `OpenAICompatibleProvider(profile)` with its own base URL, key and capabilities; `listModels` returns every model the endpoint lists (no `gpt-*` filter) with known metadata where available
+- [ ] `LLM_PROVIDERS` config: parse and validate profiles at boot (unique keys, `https` base URLs except an explicit local allowance such as `localhost` in non-production, key env var present), and keep `OPENAI_BASE_URL` working for existing setups
+- [ ] Provider registry built at startup from the native providers plus the profiles; `LLMService` routes through it
+- [ ] Replace the hard-coded provider lists: the four Zod enums, `/api/llm`, `ProviderKey`, and the `"gemini"` fallbacks in `executionGraph.ts` / `agentRunner.ts` (a configured default instead)
+- [ ] Unit tests: two profiles side by side route to their own base URLs and keys; an unknown provider is rejected by validation; an invalid profile refuses to boot; agent input cannot set a base URL
+- [ ] README: how to add an LLM by configuration, and when a native provider is still needed
+
+**Tool calling**
+
 - [ ] Add a provider-neutral message and tool format, plus `generateWithTools(messages, tools) → { text, toolCalls, stopReason, usage }` to `LLMProvider`
 - [ ] Gemini mapping: `functionDeclarations` / `functionCall` / `functionResponse`
-- [ ] OpenAI mapping: `tools` / `tool_calls` / `role: "tool"`
+- [ ] OpenAI-compatible mapping: `tools` / `tool_calls` / `role: "tool"` (shared by every profile with `supportsTools`)
 - [ ] Anthropic mapping: `tools` / `tool_use` / `tool_result`
+- [ ] A profile without `supportsTools` fails `generateWithTools` with a clear, non-retryable error
 - [ ] Keep the existing guarantees: rate-limit retries (`retry.ts`), truncation/refusal/empty detection (`LLMOutputError`), `describeError` logging
-- [ ] Unit tests with recorded provider responses showing the same tool call round-trips on all three
+- [ ] Unit tests with recorded provider responses showing the same tool call round-trips on Gemini, Anthropic and the OpenAI-compatible provider
 
-**Done when:** one tool definition works identically across all three providers in tests.
+**Done when:** a new OpenAI-compatible LLM can be added and used by an agent with configuration only (no code change), and one tool definition works identically across Gemini, Anthropic and the OpenAI-compatible provider in tests.
 
 ---
 
