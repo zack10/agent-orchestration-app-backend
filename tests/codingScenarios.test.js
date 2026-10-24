@@ -111,5 +111,5 @@ test("diffStats counts files and changed lines", () => {
     "+++ b/src/b.js",
     "+created",
   ].join("\n");
-  assert.deepEqual(diffStats(diff), { files: ["src/a.js", "src/b.js"], added: 3, removed: 1 });
+  assert.deepEqual(diffStats(diff), { files: ["src/a.js", "src/b.js"], editedFiles: ["src/a.js"], added: 3, removed: 1 });
 });

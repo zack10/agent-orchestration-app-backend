@@ -54,18 +54,29 @@ const writeTree = (dir, files) => {
 /** Where a hidden test is placed for grading; it requires "../src/...". */
 const hiddenTestPath = (scenario) => `hidden/${scenario.id}.test.js`;
 
-/** Files touched and lines added/removed by a `git diff` patch. */
+/**
+ * Files touched and lines added/removed by a `git diff` patch. `editedFiles`
+ * lists files that lost or changed at least one existing line (including
+ * deleted files), as opposed to files that only gained lines.
+ */
 const diffStats = (diff) => {
   const files = new Set();
+  const editedFiles = new Set();
+  let current;
   let added = 0;
   let removed = 0;
   for (const line of diff.split("\n")) {
     const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
-    if (header) files.add(header[2]);
-    else if (line.startsWith("+") && !line.startsWith("+++")) added += 1;
-    else if (line.startsWith("-") && !line.startsWith("---")) removed += 1;
+    if (header) {
+      current = header[2];
+      files.add(current);
+    } else if (line.startsWith("+") && !line.startsWith("+++")) added += 1;
+    else if (line.startsWith("-") && !line.startsWith("---")) {
+      removed += 1;
+      editedFiles.add(current);
+    }
   }
-  return { files: [...files].sort(), added, removed };
+  return { files: [...files].sort(), editedFiles: [...editedFiles].sort(), added, removed };
 };
 
 module.exports = {

@@ -219,7 +219,9 @@ const runScenario = async (fixtures, scenario, runNumber) => {
       result.linesAdded = stats.added;
       result.linesRemoved = stats.removed;
       result.onlyExpectedFiles = stats.files.every((file) => scenario.expectedFiles.includes(file));
-      result.testsModified = stats.files.some((file) => file.startsWith("tests/"));
+      // Adding test cases is fine; changing or deleting existing ones is the gaming risk.
+      result.testsModified = stats.editedFiles.some((file) => file.startsWith("tests/"));
+      result.testsAdded = stats.files.some((file) => file.startsWith("tests/") && !stats.editedFiles.includes(file));
 
       if (scenario.expect === "blocked") {
         result.outcome = "wrong_fix_shipped";
@@ -305,11 +307,11 @@ const writeReport = (results, meta) => {
     "",
     "## Runs",
     "",
-    "| Scenario | Run | Outcome | Attempts | LLM calls | Duration | Files changed | Lines +/- | Only expected files | Tests modified | Note |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    "| Scenario | Run | Outcome | Attempts | LLM calls | Duration | Files changed | Lines +/- | Only expected files | Tests added | Existing tests changed | Note |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ...results.map(
       (result) =>
-        `| ${result.scenario} | ${result.run} | ${OUTCOMES[result.outcome]} | ${result.attempts ?? ""} | ${result.llmCalls ?? ""} | ${Math.round(result.durationMs / 1000)}s | ${cell((result.files ?? []).join(", "))} | ${result.files ? `+${result.linesAdded}/-${result.linesRemoved}` : ""} | ${result.files ? (result.onlyExpectedFiles ? "yes" : "no") : ""} | ${result.files ? (result.testsModified ? "**yes**" : "no") : ""} | ${cell(result.note)} |`,
+        `| ${result.scenario} | ${result.run} | ${OUTCOMES[result.outcome]} | ${result.attempts ?? ""} | ${result.llmCalls ?? ""} | ${Math.round(result.durationMs / 1000)}s | ${cell((result.files ?? []).join(", "))} | ${result.files ? `+${result.linesAdded}/-${result.linesRemoved}` : ""} | ${result.files ? (result.onlyExpectedFiles ? "yes" : "no") : ""} | ${result.files ? (result.testsAdded ? "yes" : "no") : ""} | ${result.files ? (result.testsModified ? "**yes**" : "no") : ""} | ${cell(result.note)} |`,
     ),
     "",
     "Tokens are not recorded yet (the pipeline does not track usage until Phase 3).",
