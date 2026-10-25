@@ -10,7 +10,7 @@ The existing plumbing stays: Docker sandbox, LangGraph run graph, snapshot-bound
 
 | Phase | Problem it solves | How (concept) | Size | Status |
 | --- | --- | --- | --- | --- |
-| 0. Coding evaluation + prompt management | We can't tell whether the agent writes correct code, or whether a change made it better or worse. | A benchmark of 8 realistic bugs scored by hidden tests the agent never sees; prompts move to versioned files so every result is tied to the exact prompts used. | M | Built; baseline running on the free tier (~2 scenarios/day) |
+| 0. Coding evaluation + prompt management | We can't tell whether the agent writes correct code, or whether a change made it better or worse. | A benchmark of 8 realistic bugs scored by hidden tests the agent never sees; prompts move to versioned files so every result is tied to the exact prompts used. | M | Done (baseline 2026-10-25: 6/8 pass, 1 wrong fix shipped) |
 | 1. Provider registry + tool calling in the LLM layer | Each new LLM needs its own code and edits in several places, and the LLM layer can only send text and get text back, so the model can't ask to do anything. | One generic OpenAI-compatible provider configured per vendor (new vendors need configuration only), a single provider registry, then function calling behind one shared format. | M–L | Not started |
 | 2. Sandbox tools | The agent only sees files chosen by name, cut at 20 KB, and must rewrite whole files; it can also edit tests. | Give it safe tools inside the Docker sandbox (list, read, search, edit, run checks) with the safety rules enforced in each tool, and log every call. | M | Not started |
 | 3. Agent loop | The agent gets one shot per attempt and can't explore, check its work or change course. | A loop where the model picks a tool, sees the result and decides the next step, until it finishes or hits a step/token/time budget; the existing checks still run after it. | L | Not started |
@@ -112,10 +112,27 @@ The benchmark only means something if every result is tied to the exact prompts 
 - [x] Build the benchmark repo content and the 8 scenarios (as sources here instead of branches; see Design)
 - [x] `tests/e2e/coding-scenarios/<id>/` with ticket text, expected files and hidden test for each scenario, plus the fairness check in `npm test`
 - [x] Runner `npm run eval:coding` (reuses `tests/e2e/helpers.js` and the new `tests/e2e/pipeline.js`) that writes `docs/testing/coding-eval-<date>.md`; `--check` verifies the setup without LLM calls. The grader was checked against known-good and known-bad diffs; a full run is still pending
-- [ ] Run the baseline (single-shot agent, 1 run per scenario on the free tier) and record it in the results log (in progress: 4/8 scenarios, all correct fixes; reports `docs/testing/coding-eval-2026-10-24*.md`. Next: 05–06, then 07–08)
+- [x] Run the baseline (single-shot agent, 1 run per scenario on the free tier) and record it in the results log (2026-10-24/25; see the results log and the findings below)
 - [ ] After the baseline, first prompt experiment: `implement.v2` asking explicitly for `actions` as one string. On `gemini-flash-lite-latest`, attempt 1 of every baseline run so far was rejected because `actions` came back as an array, costing one attempt and one LLM call per scenario
 
 **Done when:** prompts live in versioned files, and a baseline report exists, tied to those prompt versions, with per-scenario outcomes and an overall pass rate and wrong-fix-shipped rate.
+
+### Baseline findings (2026-10-25)
+
+1 run per scenario on `gemini-flash-lite-latest`, so each number is one sample; re-run 8 × 3 when a paid key is available.
+
+| # | Outcome | What happened |
+| --- | --- | --- |
+| 1–5 | Correct fix | Small, focused fixes, each with added regression tests; no existing test changed |
+| 6 | **Wrong fix shipped** | Found the right file from a vague ticket and fixed the import, but the rewrite broke the exported `parseLine` (`"a,b,c"` → `["a"]`). First graded correct: nothing tested `parseLine`. The hidden test now checks it and the stored diff was re-graded |
+| 7 | No fix (blocked) | 2 of 3 attempts lost to the `actions` format; the one real attempt failed the repo's tests (large-file weak spot) |
+| 8 | Correctly blocked | The planner refused the right way, but the implement step cannot decline: it must return FILE blocks, so it was blocked only by exhausting all 3 attempts |
+
+What this says about the next phases:
+
+- **Attempt 1 failed on output format in all 8 runs** (`actions` sent as an array). That is ~1 LLM call and 1 of 3 attempts wasted per ticket, and it cost scenario 7 its fix. First experiment: `implement.v2` (task below). The Phase 3 tool loop removes the free-text file format entirely.
+- **There is no way to decline a ticket.** An impossible or unsafe ticket ends `BLOCKED` only after burning every attempt, with "no FILE blocks" as the recorded reason. Phase 3's `finish(summary)` needs an explicit "cannot do / needs clarification" outcome, and Phase 5's planner should be able to stop at plan time.
+- **Hidden tests must also protect the exported API of the files a fix is likely to touch**, not only the bug. Scenario 6 showed a rewrite can pass every bug test while breaking a neighbouring function. Apply this rule when adding scenarios.
 
 ---
 
@@ -339,4 +356,4 @@ One row per benchmark run, newest last.
 
 | Date | Phase / change | Mode | Model | Prompt versions | Skills | Runs | Correct fix | Wrong fix shipped | Correctly blocked | Infra failures | Avg attempts | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| | | | | | | | | | | | | |
+| 2026-10-25 | 0. Baseline | single_shot | gemini-flash-lite-latest | plan.v1, review.v1, analyze.v1, implement.v1, file-format.v1 | none | 8 (1 per scenario) | 5 | 1 | 1 | 0 | 2.25 | Pass rate 75% (6/8), wrong-fix-shipped 13% (1/8), 33 LLM calls, code `0356a2a`+grader fixes. 1 no fix (#7). Reports: [10-24](../testing/coding-eval-2026-10-24.md), [10-24-2](../testing/coding-eval-2026-10-24-2.md), [10-25](../testing/coding-eval-2026-10-25.md), [10-25-2](../testing/coding-eval-2026-10-25-2.md) |
