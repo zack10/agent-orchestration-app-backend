@@ -4,7 +4,7 @@ Express/TypeScript backend that turns tickets into reviewed code changes. An AI 
 
 It also runs a simpler general-purpose pipeline: queue a task for an LLM agent and get structured output back.
 
-Built on PostgreSQL + Prisma, RabbitMQ, LangGraph, and pluggable LLM providers (Gemini, OpenAI, Anthropic).
+Built on PostgreSQL + Prisma, RabbitMQ, LangGraph, and pluggable LLM providers (Gemini, Anthropic, and any OpenAI-compatible API by configuration).
 
 ## Contents
 
@@ -63,7 +63,7 @@ flowchart LR
     client(["API client / UI"])
     trello[("Trello")]
     github[("GitHub")]
-    llm[("LLM providers<br/>Gemini · OpenAI · Anthropic")]
+    llm[("LLM providers<br/>Gemini · Anthropic · OpenAI-compatible")]
 
     subgraph app["Node process (src/index.ts)"]
         direction TB
@@ -381,13 +381,40 @@ Behaviour worth knowing:
 | --- | --- |
 | Core | `NODE_ENV`, `PORT`, `DATABASE_URL`, `RABBITMQ_URL`, `ENCRYPTION_KEY` |
 | API access | `API_AUTH_TOKEN`, `API_AUTH_ACTOR`, `AUTH_DISABLED`, `CORS_ORIGINS`, `API_RATE_LIMIT_PER_MINUTE` |
-| LLM | `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `LLM_REQUEST_TIMEOUT_MS`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_RATE_LIMIT_RETRIES` |
+| LLM | `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `LLM_PROVIDERS`, `LLM_DEFAULT_PROVIDER`, `LLM_DEFAULT_MODEL`, `LLM_REQUEST_TIMEOUT_MS`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_RATE_LIMIT_RETRIES` |
 | Task pipeline | `TASK_MAX_ATTEMPTS`, `TASK_RETRY_DELAY_MS`, `TASK_LEASE_MS`, `GENERATED_CODE_MAX_FILES`, `GENERATED_CODE_MAX_FILE_BYTES`, `STORE_RAW_LLM_OUTPUT` |
 | Execution pipeline | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `INTEGRATION_POLL_INTERVAL_MS`, `EXECUTION_LEASE_MS`, `WORKSPACE_ROOT`, `KEEP_WORKSPACES`, `ARTIFACT_ROOT` |
 | Messaging | `CONSUMER_MAX_ATTEMPTS`, `CONSUMER_RETRY_DELAY_MS` |
 | HTTP connector | `MCP_HTTP_ALLOWED_HOSTS`, `MCP_HTTP_ALLOW_PRIVATE_IPS`, `MCP_HTTP_TIMEOUT_MS`, `MCP_HTTP_MAX_RESPONSE_BYTES` |
 
 Defaults and comments are in `.env.example`; `src/config.ts` is the single place they are read.
+
+### Adding an LLM provider
+
+Built in: `gemini` and `anthropic` (native APIs) and `openai`. Any other API that speaks OpenAI's `/models` and `/chat/completions` format (Groq, Mistral, DeepSeek, xAI, Together, Fireworks, OpenRouter, a LiteLLM proxy, or local Ollama / vLLM / LM Studio) is added with configuration only, as a profile in `LLM_PROVIDERS`:
+
+```bash
+LLM_PROVIDERS='[
+  {"key": "groq", "label": "Groq", "baseUrl": "https://api.groq.com/openai/v1", "apiKeyEnv": "GROQ_API_KEY", "supportsTools": true},
+  {"key": "ollama", "baseUrl": "http://localhost:11434/v1"}
+]'
+GROQ_API_KEY=...
+```
+
+Agents then use `"provider": "groq"` with a `model` the endpoint offers (`GET /api/llm/models?provider=groq`). `GET /api/llm/providers` lists every configured provider.
+
+| Field | Meaning |
+| --- | --- |
+| `key` | Name agents use; lowercase letters, digits, dashes; must not clash with a built-in |
+| `baseUrl` | API root. `https` only; `http` is allowed for `localhost` outside production |
+| `apiKeyEnv` | Environment variable holding the server's key. Omit for keyless local servers or when each agent sets `config.apiKey` |
+| `supportsTools` | Whether the endpoint supports tool calling (default `false`) |
+| `modelPrefixes` | Optional: list only models whose id starts with one of these |
+| `label` | Optional display name used in errors and model lists |
+
+The server refuses to start if a profile is invalid (bad URL, duplicate key, `apiKeyEnv` not set). Base URLs come only from this configuration: an agent chooses a provider key, never a host, so it cannot make the server send a key elsewhere.
+
+An agent without a `provider` uses `LLM_DEFAULT_PROVIDER` and `LLM_DEFAULT_MODEL` (default `gemini` / `gemini-flash-latest`); an agent with a provider but no model fails with a clear error. APIs with their own format (e.g. AWS Bedrock, Vertex AI) still need a native provider class in `src/services/llm/providers/`.
 
 ## Testing
 

@@ -101,9 +101,10 @@ export const runAgent = async (taskId: string) => {
       apiKey = decrypt(config.apiKey);
     }
 
+    const { provider, model } = llmService.resolveModel(agent);
     const rawOutput = await llmService.generateContent(
-      agent.provider || "gemini",
-      agent.model || "gemini-flash-latest",
+      provider,
+      model,
       prompt,
       apiKey,
     );

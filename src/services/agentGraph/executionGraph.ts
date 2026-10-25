@@ -77,6 +77,16 @@ const ExecutionGraphState = Annotation.Root({
   route: Annotation<GraphRoute>(),
 });
 
+/** Sends a prompt to the run's agent (provider and model resolved in load_context). */
+const askAgent = (
+  state: typeof ExecutionGraphState.State,
+  prompt: { system?: string; user: string },
+) => {
+  if (!state.agentProvider || !state.agentModel)
+    throw new Error("Execution graph is missing the agent's provider or model");
+  return llm.generateContent(state.agentProvider, state.agentModel, prompt, state.agentApiKey);
+};
+
 const parseJsonRecord = (raw: string) => {
   const candidate = raw.trim().replace(/^```(?:json)?\s*/i, "");
   const clean = candidate.endsWith("```")
@@ -179,6 +189,7 @@ const loadExecutionContext = async (
     promptVersions: EXECUTION_PROMPTS,
   });
 
+  const resolved = llm.resolveModel(agent);
   const agentConfig = agent.config as { apiKey?: string } | null;
   const agentApiKey = agentConfig?.apiKey
     ? decrypt(agentConfig.apiKey)
@@ -189,8 +200,8 @@ const loadExecutionContext = async (
     githubToken,
     planTaskId: planTask.id,
     attemptOffset: previousAttempts._max.number ?? 0,
-    agentProvider: agent.provider || "gemini",
-    agentModel: agent.model || "gemini-flash-latest",
+    agentProvider: resolved.provider,
+    agentModel: resolved.model,
     agentApiKey,
     ticket: `${execution.workItem.title}\n${execution.workItem.description ?? ""}`,
   };
@@ -218,12 +229,7 @@ const planChange = async (state: typeof ExecutionGraphState.State) => {
     ticket: state.ticket,
     repoContext: state.repoContext.summary,
   });
-  const raw = await llm.generateContent(
-    state.agentProvider || "gemini",
-    state.agentModel || "gemini-flash-latest",
-    prompt,
-    state.agentApiKey,
-  );
+  const raw = await askAgent(state, prompt);
   const parsed = parseJsonRecord(raw);
   const internalPlan = JSON.stringify(
     {
@@ -261,9 +267,8 @@ const implementChange = async (state: typeof ExecutionGraphState.State) => {
     promptVersions: EXECUTION_PROMPTS,
   });
 
-  const raw = await llm.generateContent(
-    state.agentProvider || "gemini",
-    state.agentModel || "gemini-flash-latest",
+  const raw = await askAgent(
+    state,
     renderExecutionPrompt("implement", {
       ticket: state.ticket,
       internalPlan: state.internalPlan || "No internal plan was produced.",
@@ -272,7 +277,6 @@ const implementChange = async (state: typeof ExecutionGraphState.State) => {
       lastFailure: state.lastFailure || "None",
       fileBlockFormat: FILE_BLOCK_FORMAT,
     }),
-    state.agentApiKey,
   );
   const parsed = parseAgentOutput(raw);
 
@@ -400,12 +404,7 @@ const analyzeFailure = async (state: typeof ExecutionGraphState.State) => {
     internalPlan: state.internalPlan,
     lastFailure: state.lastFailure,
   });
-  const raw = await llm.generateContent(
-    state.agentProvider || "gemini",
-    state.agentModel || "gemini-flash-latest",
-    prompt,
-    state.agentApiKey,
-  );
+  const raw = await askAgent(state, prompt);
   const parsed = parseJsonRecord(raw);
   const guidance = JSON.stringify(
     {
@@ -452,12 +451,7 @@ const reviewDiff = async (state: typeof ExecutionGraphState.State) => {
     changedFiles: files.join("\n"),
     diff: diff.slice(0, 80_000),
   });
-  const raw = await llm.generateContent(
-    state.agentProvider || "gemini",
-    state.agentModel || "gemini-flash-latest",
-    prompt,
-    state.agentApiKey,
-  );
+  const raw = await askAgent(state, prompt);
   const parsed = parseJsonRecord(raw);
   const approved = parsed.approved === true;
   const issues = Array.isArray(parsed.issues)

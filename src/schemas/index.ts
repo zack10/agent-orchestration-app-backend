@@ -1,6 +1,14 @@
 import { z } from "zod";
+import { getProviderRegistry } from "../services/llm/registry";
 
 const uuid = z.string().uuid();
+
+// Any provider in the registry: built-ins plus LLM_PROVIDERS profiles.
+const providerKey = z
+  .string()
+  .refine((key) => getProviderRegistry().has(key), {
+    message: "Unknown LLM provider; see GET /api/llm/providers",
+  });
 
 // Agent schemas
 export const createAgentSchema = z.object({
@@ -9,7 +17,7 @@ export const createAgentSchema = z.object({
     description: z.string().optional(),
     config: z.record(z.unknown()).optional(),
     projectId: uuid.optional(),
-    provider: z.enum(["gemini", "openai", "anthropic"]).optional(),
+    provider: providerKey.optional(),
     model: z.string().min(1).optional(),
     baseInstructions: z.string().max(20_000).optional(),
   }),
@@ -22,7 +30,7 @@ export const updateAgentSchema = z.object({
     description: z.string().optional(),
     config: z.record(z.unknown()).optional(),
     projectId: uuid.optional(),
-    provider: z.enum(["gemini", "openai", "anthropic"]).optional(),
+    provider: providerKey.optional(),
     model: z.string().min(1).optional(),
     baseInstructions: z.string().max(20_000).optional(),
   }),
@@ -68,13 +76,13 @@ export const createTaskSchema = z.object({
 
 export const discoverProviderSchema = z.object({
   body: z.object({
-    provider: z.enum(["gemini", "openai", "anthropic"]),
+    provider: providerKey,
     apiKey: z.string().min(1),
   }),
 });
 
 export const providerQuerySchema = z.object({
-  query: z.object({ provider: z.enum(["gemini", "openai", "anthropic"]) }),
+  query: z.object({ provider: providerKey }),
 });
 
 // Project schemas

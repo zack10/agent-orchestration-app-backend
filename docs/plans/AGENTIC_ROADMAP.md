@@ -11,7 +11,7 @@ The existing plumbing stays: Docker sandbox, LangGraph run graph, snapshot-bound
 | Phase | Problem it solves | How (concept) | Size | Status |
 | --- | --- | --- | --- | --- |
 | 0. Coding evaluation + prompt management | We can't tell whether the agent writes correct code, or whether a change made it better or worse. | A benchmark of 8 realistic bugs scored by hidden tests the agent never sees; prompts move to versioned files so every result is tied to the exact prompts used. | M | Done (baseline 2026-10-25: 6/8 pass, 1 wrong fix shipped) |
-| 1. Provider registry + tool calling in the LLM layer | Each new LLM needs its own code and edits in several places, and the LLM layer can only send text and get text back, so the model can't ask to do anything. | One generic OpenAI-compatible provider configured per vendor (new vendors need configuration only), a single provider registry, then function calling behind one shared format. | M–L | Not started |
+| 1. Provider registry + tool calling in the LLM layer | Each new LLM needs its own code and edits in several places, and the LLM layer can only send text and get text back, so the model can't ask to do anything. | One generic OpenAI-compatible provider configured per vendor (new vendors need configuration only), a single provider registry, then function calling behind one shared format. | M–L | In progress: provider registry done, tool calling next |
 | 2. Sandbox tools | The agent only sees files chosen by name, cut at 20 KB, and must rewrite whole files; it can also edit tests. | Give it safe tools inside the Docker sandbox (list, read, search, edit, run checks) with the safety rules enforced in each tool, and log every call. | M | Not started |
 | 3. Agent loop | The agent gets one shot per attempt and can't explore, check its work or change course. | A loop where the model picks a tool, sees the result and decides the next step, until it finishes or hits a step/token/time budget; the existing checks still run after it. | L | Not started |
 | 4. Parallel executions (several tickets at once) | Tickets run one after another, so one slow ticket holds up the rest. | Allow several runs at once with limits on runs, CPU/memory and LLM rate, keep each run isolated, and let workers scale as separate processes. | M–L | Not started |
@@ -156,12 +156,14 @@ Today providers only offer `generateContent(prompt) → text` (`src/services/llm
 
 **Provider registry**
 
-- [ ] Turn `OpenAIProvider` into a generic `OpenAICompatibleProvider(profile)` with its own base URL, key and capabilities; `listModels` returns every model the endpoint lists (no `gpt-*` filter) with known metadata where available
-- [ ] `LLM_PROVIDERS` config: parse and validate profiles at boot (unique keys, `https` base URLs except an explicit local allowance such as `localhost` in non-production, key env var present), and keep `OPENAI_BASE_URL` working for existing setups
-- [ ] Provider registry built at startup from the native providers plus the profiles; `LLMService` routes through it
-- [ ] Replace the hard-coded provider lists: the four Zod enums, `/api/llm`, `ProviderKey`, and the `"gemini"` fallbacks in `executionGraph.ts` / `agentRunner.ts` (a configured default instead)
-- [ ] Unit tests: two profiles side by side route to their own base URLs and keys; an unknown provider is rejected by validation; an invalid profile refuses to boot; agent input cannot set a base URL
-- [ ] README: how to add an LLM by configuration, and when a native provider is still needed
+- [x] Turn `OpenAIProvider` into a generic `OpenAICompatibleProvider(profile)` with its own base URL, key and capabilities; `listModels` returns every model the endpoint lists (no `gpt-*` filter) with known metadata where available
+- [x] `LLM_PROVIDERS` config: parse and validate profiles at boot (unique keys, `https` base URLs except an explicit local allowance such as `localhost` in non-production, key env var present), and keep `OPENAI_BASE_URL` working for existing setups
+- [x] Provider registry built at startup from the native providers plus the profiles; `LLMService` routes through it
+- [x] Replace the hard-coded provider lists: the four Zod enums, `/api/llm`, `ProviderKey`, and the `"gemini"` fallbacks in `executionGraph.ts` / `agentRunner.ts` (a configured default instead)
+- [x] Unit tests: two profiles side by side route to their own base URLs and keys; an unknown provider is rejected by validation; an invalid profile refuses to boot; agent input cannot set a base URL
+- [x] README: how to add an LLM by configuration, and when a native provider is still needed
+
+Registry done 2026-10-25 (`src/services/llm/registry.ts`, `providers/OpenAICompatibleProvider.ts`, `tests/llmRegistry.test.js`). Not yet tried against a real non-OpenAI vendor: a quick check with a local Ollama or any vendor key is still open.
 
 **Tool calling**
 

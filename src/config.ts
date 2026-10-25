@@ -47,6 +47,11 @@ export const config = {
     process.env.LLM_MAX_OUTPUT_TOKENS,
     16_000,
   ),
+  // JSON array of OpenAI-compatible provider profiles (services/llm/registry.ts).
+  llmProviders: process.env.LLM_PROVIDERS ?? "",
+  // Used when an agent has no provider/model set.
+  llmDefaultProvider: process.env.LLM_DEFAULT_PROVIDER || "gemini",
+  llmDefaultModel: process.env.LLM_DEFAULT_MODEL || "gemini-flash-latest",
   llmRateLimitRetries: parsePositiveInt(
     process.env.LLM_RATE_LIMIT_RETRIES,
     3,

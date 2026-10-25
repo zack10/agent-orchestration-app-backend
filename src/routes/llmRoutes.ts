@@ -4,12 +4,18 @@ import { asyncHandler } from "../middleware/asyncHandler";
 import { validate } from "../middleware/validate";
 import { discoverProviderSchema, providerQuerySchema } from "../schemas";
 import { LLMService } from "../services/llm/LLMService";
+import { getProviderRegistry } from "../services/llm/registry";
 
 const router = Router();
 const llmService = new LLMService();
 
 router.get("/providers", (_req, res) => {
-  res.json({ providers: ["gemini", "openai", "anthropic"] });
+  const registry = getProviderRegistry();
+  res.json({
+    providers: registry.list().map((provider) => provider.key),
+    details: registry.list(),
+    default: { provider: registry.defaultProvider, model: registry.defaultModel },
+  });
 });
 
 router.post(

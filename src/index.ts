@@ -29,11 +29,14 @@ import {
   startIntegrationPolling,
   stopIntegrationPolling,
 } from "./services/integrationPollingService";
+import { getProviderRegistry } from "./services/llm/registry";
 
 dotenv.config();
 
 const app = express();
 validateProductionConfig();
+// Fails at boot on an invalid LLM_PROVIDERS or default provider.
+getProviderRegistry();
 
 app.disable("x-powered-by");
 app.use(securityHeaders);

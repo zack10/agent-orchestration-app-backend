@@ -1,12 +1,9 @@
 import dotenv from "dotenv";
 import { config } from "../../config";
-import { AnthropicProvider } from "./providers/AnthropicProvider";
-import { GeminiProvider } from "./providers/GeminiProvider";
-import { OpenAIProvider } from "./providers/OpenAIProvider";
+import { NonRetryableError } from "../../utils/safeError";
+import { ProviderRegistry, getProviderRegistry } from "./registry";
 import { withLLMRetry } from "./retry";
 import { LLMProvider, Model, UsageStats } from "./types";
-
-export type ProviderKey = "gemini" | "openai" | "anthropic";
 
 dotenv.config();
 
@@ -14,24 +11,40 @@ dotenv.config();
  * Main LLM Service handling provider discovery and routing
  */
 export class LLMService {
-  private readonly providers: Map<string, LLMProvider> = new Map();
+  // Resolved on first use, so importing this module never reads provider config.
+  constructor(private readonly customRegistry?: ProviderRegistry) {}
 
-  constructor() {
-    // Register default providers
-    this.providers.set("gemini", new GeminiProvider());
-    this.providers.set("openai", new OpenAIProvider());
-    this.providers.set("anthropic", new AnthropicProvider());
+  private get registry(): ProviderRegistry {
+    return this.customRegistry ?? getProviderRegistry();
+  }
+
+  private provider(providerKey: string): LLMProvider {
+    return this.registry.get(providerKey);
+  }
+
+  /**
+   * The provider and model an agent runs on. An agent without a provider uses
+   * the configured default; one with a provider but no model is a setup
+   * error, since the default model belongs to the default provider.
+   */
+  resolveModel(agent: {
+    provider?: string | null;
+    model?: string | null;
+  }): { provider: string; model: string } {
+    const provider = agent.provider || this.registry.defaultProvider;
+    if (!this.registry.has(provider))
+      throw new NonRetryableError(`Agent provider "${provider}" is not configured`);
+    if (agent.model) return { provider, model: agent.model };
+    if (provider === this.registry.defaultProvider)
+      return { provider, model: this.registry.defaultModel };
+    throw new NonRetryableError(`Agent uses provider "${provider}" but has no model set`);
   }
 
   /**
    * List all available models for a specific provider
    */
   async listModels(providerKey: string, apiKey?: string): Promise<Model[]> {
-    const provider = this.providers.get(providerKey);
-    if (!provider) {
-      throw new Error(`Provider ${providerKey} not found`);
-    }
-    return provider.listModels(apiKey);
+    return this.provider(providerKey).listModels(apiKey);
   }
 
   /**
@@ -43,10 +56,7 @@ export class LLMService {
     prompt: { system?: string; user: string },
     apiKey?: string,
   ): Promise<string> {
-    const provider = this.providers.get(providerKey);
-    if (!provider) {
-      throw new Error(`Provider ${providerKey} not found`);
-    }
+    const provider = this.provider(providerKey);
     return withLLMRetry(
       () => provider.generateContent(model, prompt, apiKey),
       { retries: config.llmRateLimitRetries },
@@ -60,11 +70,7 @@ export class LLMService {
     providerKey: string,
     apiKey: string,
   ): Promise<{ models: Model[]; usage: UsageStats }> {
-    const provider = this.providers.get(providerKey);
-    if (!provider) {
-      throw new Error(`Provider ${providerKey} not found`);
-    }
-
+    const provider = this.provider(providerKey);
     const [models, usage] = await Promise.all([
       provider.listModels(apiKey),
       provider.getUsage(apiKey),
@@ -77,10 +83,6 @@ export class LLMService {
    * Get usage statistics for a provider
    */
   async getUsage(providerKey: string, apiKey?: string): Promise<UsageStats> {
-    const provider = this.providers.get(providerKey);
-    if (!provider) {
-      throw new Error(`Provider ${providerKey} not found`);
-    }
-    return provider.getUsage(apiKey);
+    return this.provider(providerKey).getUsage(apiKey);
   }
 }
