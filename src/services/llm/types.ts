@@ -5,7 +5,72 @@ export interface LLMProvider {
     prompt: { system?: string; user: string },
     apiKey?: string,
   ): Promise<string>;
+  generateWithTools(
+    model: string,
+    request: ToolRequest,
+    apiKey?: string,
+  ): Promise<ToolTurn>;
   getUsage(apiKey?: string): Promise<UsageStats>;
+}
+
+/**
+ * A tool the model may call. `parameters` is a JSON Schema object; keep to
+ * the subset every provider accepts (type, properties, required, items,
+ * enum, description), since Gemini rejects the rest.
+ */
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+/**
+ * Provider-neutral conversation. An assistant message carries the
+ * provider's raw reply in `raw`, which that provider replays unchanged:
+ * Anthropic thinking blocks and Gemini thought signatures must come back
+ * exactly as received, or the next request is rejected.
+ */
+export type ChatMessage =
+  | { role: "user"; content: string }
+  | {
+      role: "assistant";
+      content: string;
+      toolCalls: ToolCall[];
+      raw?: { provider: string; content: unknown };
+    }
+  | {
+      role: "tool";
+      toolCallId: string;
+      name: string;
+      content: string;
+      isError?: boolean;
+    };
+
+export interface ToolRequest {
+  system?: string;
+  messages: ChatMessage[];
+  tools: ToolDefinition[];
+}
+
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface ToolTurn {
+  /** Append this to the conversation before sending tool results. */
+  message: Extract<ChatMessage, { role: "assistant" }>;
+  text: string;
+  toolCalls: ToolCall[];
+  /** "tool_use": run the calls and send their results; "end_turn": done. */
+  stopReason: "tool_use" | "end_turn";
+  usage?: TokenUsage;
 }
 
 export interface Model {

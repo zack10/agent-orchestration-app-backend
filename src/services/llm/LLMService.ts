@@ -3,7 +3,7 @@ import { config } from "../../config";
 import { NonRetryableError } from "../../utils/safeError";
 import { ProviderRegistry, getProviderRegistry } from "./registry";
 import { withLLMRetry } from "./retry";
-import { LLMProvider, Model, UsageStats } from "./types";
+import { LLMProvider, Model, ToolRequest, ToolTurn, UsageStats } from "./types";
 
 dotenv.config();
 
@@ -59,6 +59,29 @@ export class LLMService {
     const provider = this.provider(providerKey);
     return withLLMRetry(
       () => provider.generateContent(model, prompt, apiKey),
+      { retries: config.llmRateLimitRetries },
+    );
+  }
+
+  /**
+   * One model turn with tools available. The caller runs any returned tool
+   * calls, appends `turn.message` and the results, and calls again until
+   * `stopReason` is "end_turn".
+   */
+  async generateWithTools(
+    providerKey: string,
+    model: string,
+    request: ToolRequest,
+    apiKey?: string,
+  ): Promise<ToolTurn> {
+    const provider = this.provider(providerKey);
+    // Fail before spending a request: a text-only endpoint would ignore the tools.
+    if (!this.registry.supportsTools(providerKey))
+      throw new NonRetryableError(
+        `Provider "${providerKey}" does not support tool calling (set "supportsTools": true in its LLM_PROVIDERS profile if it does)`,
+      );
+    return withLLMRetry(
+      () => provider.generateWithTools(model, request, apiKey),
       { retries: config.llmRateLimitRetries },
     );
   }

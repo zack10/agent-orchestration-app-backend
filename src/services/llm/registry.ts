@@ -158,6 +158,10 @@ export class ProviderRegistry {
     return entry.provider;
   }
 
+  supportsTools(key: string): boolean {
+    return this.providers.get(key)?.info.supportsTools ?? false;
+  }
+
   list(): ProviderInfo[] {
     return [...this.providers.values()].map((entry) => entry.info);
   }

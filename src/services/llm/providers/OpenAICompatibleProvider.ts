@@ -1,7 +1,7 @@
 import axios from "axios";
 import { config } from "../../../config";
 import { LLMOutputError } from "../errors";
-import { LLMProvider, Model, UsageStats } from "../types";
+import { LLMProvider, Model, ToolRequest, ToolTurn, UsageStats } from "../types";
 
 interface OpenAIModel {
   id: string;
@@ -116,6 +116,98 @@ export class OpenAICompatibleProvider implements LLMProvider {
     const text = choice?.message?.content ?? "";
     if (!text.trim()) throw new LLMOutputError(label, "empty response");
     return text;
+  }
+
+  async generateWithTools(
+    model: string,
+    request: ToolRequest,
+    apiKey?: string,
+  ): Promise<ToolTurn> {
+    const { label } = this.profile;
+    const messages: Array<Record<string, unknown>> = [];
+    if (request.system) messages.push({ role: "system", content: request.system });
+    for (const message of request.messages) {
+      if (message.role === "user") messages.push({ role: "user", content: message.content });
+      else if (message.role === "tool")
+        messages.push({
+          role: "tool",
+          tool_call_id: message.toolCallId,
+          content: message.isError ? `Error: ${message.content}` : message.content,
+        });
+      else
+        messages.push({
+          role: "assistant",
+          content: message.content || null,
+          ...(message.toolCalls.length > 0
+            ? {
+                tool_calls: message.toolCalls.map((call) => ({
+                  id: call.id,
+                  type: "function",
+                  function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+                })),
+              }
+            : {}),
+        });
+    }
+
+    const response = await axios.post(
+      `${this.profile.baseUrl}/chat/completions`,
+      {
+        model,
+        messages,
+        tools: request.tools.map((tool) => ({
+          type: "function",
+          function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+        })),
+      },
+      {
+        headers: this.headers(apiKey),
+        timeout: config.llmRequestTimeoutMs,
+      },
+    );
+    const data = response.data as {
+      choices?: Array<{
+        finish_reason?: string;
+        message?: {
+          content?: string | null;
+          tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
+        };
+      }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+    const choice = data.choices?.[0];
+    if (choice?.finish_reason === "length")
+      throw new LLMOutputError(label, "truncated at the token limit");
+    if (choice?.finish_reason === "content_filter")
+      throw new LLMOutputError(label, "blocked by content filter");
+    const text = choice?.message?.content ?? "";
+    const toolCalls = (choice?.message?.tool_calls ?? []).map((call, index) => {
+      let args: unknown;
+      try {
+        args = JSON.parse(call.function?.arguments || "{}");
+      } catch {
+        throw new LLMOutputError(label, `tool call ${call.function?.name ?? index} has invalid JSON arguments`);
+      }
+      if (!args || typeof args !== "object" || Array.isArray(args))
+        throw new LLMOutputError(label, `tool call ${call.function?.name ?? index} arguments are not an object`);
+      return {
+        id: call.id || `call-${index}`,
+        name: call.function?.name ?? "",
+        arguments: args as Record<string, unknown>,
+      };
+    });
+    if (!text.trim() && toolCalls.length === 0)
+      throw new LLMOutputError(label, "empty response");
+    return {
+      message: { role: "assistant", content: text, toolCalls },
+      text,
+      toolCalls,
+      stopReason: toolCalls.length > 0 ? "tool_use" : "end_turn",
+      usage: {
+        inputTokens: data.usage?.prompt_tokens ?? 0,
+        outputTokens: data.usage?.completion_tokens ?? 0,
+      },
+    };
   }
 
   /**

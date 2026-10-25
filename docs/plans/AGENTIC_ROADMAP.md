@@ -11,7 +11,7 @@ The existing plumbing stays: Docker sandbox, LangGraph run graph, snapshot-bound
 | Phase | Problem it solves | How (concept) | Size | Status |
 | --- | --- | --- | --- | --- |
 | 0. Coding evaluation + prompt management | We can't tell whether the agent writes correct code, or whether a change made it better or worse. | A benchmark of 8 realistic bugs scored by hidden tests the agent never sees; prompts move to versioned files so every result is tied to the exact prompts used. | M | Done (baseline 2026-10-25: 6/8 pass, 1 wrong fix shipped) |
-| 1. Provider registry + tool calling in the LLM layer | Each new LLM needs its own code and edits in several places, and the LLM layer can only send text and get text back, so the model can't ask to do anything. | One generic OpenAI-compatible provider configured per vendor (new vendors need configuration only), a single provider registry, then function calling behind one shared format. | M–L | In progress: provider registry done, tool calling next |
+| 1. Provider registry + tool calling in the LLM layer | Each new LLM needs its own code and edits in several places, and the LLM layer can only send text and get text back, so the model can't ask to do anything. | One generic OpenAI-compatible provider configured per vendor (new vendors need configuration only), a single provider registry, then function calling behind one shared format. | M–L | Done; live check pending for Anthropic and OpenAI-compatible (no keys yet) |
 | 2. Sandbox tools | The agent only sees files chosen by name, cut at 20 KB, and must rewrite whole files; it can also edit tests. | Give it safe tools inside the Docker sandbox (list, read, search, edit, run checks) with the safety rules enforced in each tool, and log every call. | M | Not started |
 | 3. Agent loop | The agent gets one shot per attempt and can't explore, check its work or change course. | A loop where the model picks a tool, sees the result and decides the next step, until it finishes or hits a step/token/time budget; the existing checks still run after it. | L | Not started |
 | 4. Parallel executions (several tickets at once) | Tickets run one after another, so one slow ticket holds up the rest. | Allow several runs at once with limits on runs, CPU/memory and LLM rate, keep each run isolated, and let workers scale as separate processes. | M–L | Not started |
@@ -167,13 +167,15 @@ Registry done 2026-10-25 (`src/services/llm/registry.ts`, `providers/OpenAICompa
 
 **Tool calling**
 
-- [ ] Add a provider-neutral message and tool format, plus `generateWithTools(messages, tools) → { text, toolCalls, stopReason, usage }` to `LLMProvider`
-- [ ] Gemini mapping: `functionDeclarations` / `functionCall` / `functionResponse`
-- [ ] OpenAI-compatible mapping: `tools` / `tool_calls` / `role: "tool"` (shared by every profile with `supportsTools`)
-- [ ] Anthropic mapping: `tools` / `tool_use` / `tool_result`
-- [ ] A profile without `supportsTools` fails `generateWithTools` with a clear, non-retryable error
-- [ ] Keep the existing guarantees: rate-limit retries (`retry.ts`), truncation/refusal/empty detection (`LLMOutputError`), `describeError` logging
-- [ ] Unit tests with recorded provider responses showing the same tool call round-trips on Gemini, Anthropic and the OpenAI-compatible provider
+- [x] Add a provider-neutral message and tool format, plus `generateWithTools(messages, tools) → { text, toolCalls, stopReason, usage }` to `LLMProvider`
+- [x] Gemini mapping: `functionDeclarations` / `functionCall` / `functionResponse`
+- [x] OpenAI-compatible mapping: `tools` / `tool_calls` / `role: "tool"` (shared by every profile with `supportsTools`)
+- [x] Anthropic mapping: `tools` / `tool_use` / `tool_result`
+- [x] A profile without `supportsTools` fails `generateWithTools` with a clear, non-retryable error
+- [x] Keep the existing guarantees: rate-limit retries (`retry.ts`), truncation/refusal/empty detection (`LLMOutputError`), `describeError` logging
+- [x] Unit tests with recorded provider responses showing the same tool call round-trips on Gemini, Anthropic and the OpenAI-compatible provider
+
+Tool calling done 2026-10-25 (`generateWithTools` in `LLMService` and each provider, `toolMessages.ts`, `tests/llmTools.test.js`). Assistant turns keep the provider's raw reply and replay it, because Anthropic thinking blocks and Gemini thought signatures must come back unchanged. A live two-turn tool call worked on `gemini-flash-lite-latest`; Anthropic and the OpenAI-compatible mapping are covered by unit tests only until a key is available.
 
 **Done when:** a new OpenAI-compatible LLM can be added and used by an agent with configuration only (no code change), and one tool definition works identically across Gemini, Anthropic and the OpenAI-compatible provider in tests.
 
