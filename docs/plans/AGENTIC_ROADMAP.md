@@ -227,7 +227,7 @@ The tools are not used by the run graph yet; Phase 3 wires them into the agent l
 - [x] Execution events for each step, so a run can be replayed from `GET /api/executions/:id`
 - [x] Update the README run-graph diagram
 - [x] Run an execution end to end in `tool_loop` mode (scenario 01, 2026-10-26)
-- [ ] Run the e2e execution suite in `tool_loop` mode
+- [x] Run the e2e execution suite in `tool_loop` mode (2026-10-26: 16 passed, 1 skipped (auth check, server had auth disabled); the execution test finished in 4 loop steps, 6.7k tokens, and opened draft PR zack10/agent-orchestration-test#5)
 - [ ] Benchmark `tool_loop` and record it next to the baseline (needs more quota than the free tier: see below)
 
 **Done when:** `tool_loop` completes the e2e execution suite, and its benchmark results are recorded next to the baseline.
