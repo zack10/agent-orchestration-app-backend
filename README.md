@@ -496,13 +496,14 @@ src/
     outboxService.ts        transactional outbox flusher
     ingestionService.ts     tracker-neutral ticket ingestion
     integrationPollingService.ts
-    workspaceService.ts     Docker clone/verify/diff/publish
+    workspaceService.ts     Docker clone/verify/diff/publish, long-lived run sandbox
     agentGraph/             LangGraph run graph, repo context, repo policy, diff review
-    llm/                    providers, retries, output errors
+    llm/                    provider registry, providers, tool calling, retries, output errors
+    sandbox/                agent tools (list/read/search/edit/run_check/finish) with policy + ToolCall recording
     taskQueueService.ts, agentRunner.ts, promptBuilder.ts   task pipeline
     rabbitMQService.ts      connection, subscribe with retry/dead-letter
   integrations/         tracker adapters + registry, GitHub App
-  utils/                code writer, crypto, safe errors, LLM output parsing
+  utils/                code writer, safe paths, crypto, safe errors, LLM output parsing
 prisma/                 schema and committed migrations
 tests/                  unit tests (against dist/) and tests/e2e/
 docs/                   plans, specs, testing, guides, history

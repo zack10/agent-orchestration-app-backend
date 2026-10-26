@@ -3,8 +3,15 @@ export interface RepositoryPolicy {
   protectedPaths?: string[];
 }
 
-const DEFAULT_PROTECTED_PATHS = ["package.json", "package-lock.json", ".github"];
+export const DEFAULT_PROTECTED_PATHS = ["package.json", "package-lock.json", ".github"];
 const DEFAULT_MAX_CHANGED_FILES = 20;
+
+/** True when `file` is a protected path or lies inside one. */
+export const isProtectedPath = (file: string, protectedPaths: string[]) =>
+  protectedPaths.some(
+    (protectedPath) =>
+      file === protectedPath || file.startsWith(`${protectedPath}/`),
+  );
 
 /**
  * Returns feedback the agent can act on, or undefined when the change is
@@ -23,10 +30,7 @@ export const checkRepositoryPolicy = (
       `The change touches ${files.length} files; the limit is ${maxChangedFiles}. Make a smaller change.`,
     );
   const protectedFiles = files.filter((file) =>
-    protectedPaths.some(
-      (protectedPath) =>
-        file === protectedPath || file.startsWith(`${protectedPath}/`),
-    ),
+    isProtectedPath(file, protectedPaths),
   );
   if (protectedFiles.length)
     issues.push(

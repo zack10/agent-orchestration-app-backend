@@ -60,6 +60,9 @@ const SAFE_GIT_ARGS = [
 // is never written to .git/config or placed on the docker command line.
 const AUTH_GIT = `${SAFE_GIT} -c http.extraHeader="Authorization: Basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"`;
 
+const SANDBOX_IMAGE = "node:20-bookworm";
+const LIMIT_ARGS = ["--cpus", "2", "--memory", "2g", "--pids-limit", "256"];
+
 const dockerArgs = (
   root: string,
   network: boolean,
@@ -68,12 +71,7 @@ const dockerArgs = (
 ) => [
   "run",
   "--rm",
-  "--cpus",
-  "2",
-  "--memory",
-  "2g",
-  "--pids-limit",
-  "256",
+  ...LIMIT_ARGS,
   "--network",
   network ? "bridge" : "none",
   // `-e NAME` without a value makes docker read it from our process env.
@@ -82,7 +80,7 @@ const dockerArgs = (
   `${root}:/workspace`,
   "-w",
   "/workspace",
-  "node:20-bookworm",
+  SANDBOX_IMAGE,
   ...command,
 ];
 
@@ -249,6 +247,84 @@ export const verifyWorkspace = async (id: string, scripts: string[]) => {
     results,
   };
 };
+/**
+ * Long-lived sandbox for one run: started once, then each command is a
+ * `docker exec`, instead of a new container per command. Same limits as
+ * every other workspace container, and never any network.
+ */
+const sandboxName = (id: string) => `agent-sandbox-${safeId(id)}`;
+
+export const startSandbox = async (id: string) => {
+  // A crashed earlier attempt may have left one behind.
+  await stopSandbox(id);
+  await execDocker([
+    "run",
+    "-d",
+    "--name",
+    sandboxName(id),
+    ...LIMIT_ARGS,
+    "--network",
+    "none",
+    "-v",
+    `${workspacePath(id)}:/workspace`,
+    "-w",
+    "/workspace",
+    SANDBOX_IMAGE,
+    "sleep",
+    "infinity",
+  ]);
+};
+
+export const stopSandbox = async (id: string) => {
+  try {
+    await exec("docker", ["rm", "-f", sandboxName(id)], { timeout: 60_000 });
+  } catch {
+    // Not running: nothing to stop.
+  }
+};
+
+export interface SandboxResult {
+  exitCode: number;
+  timedOut: boolean;
+  output: string;
+}
+
+/**
+ * Runs a command in the run's sandbox. A non-zero exit is a result, not an
+ * error (a failing test is information for the agent). The time limit is
+ * enforced inside the container, so a runaway process is killed there
+ * instead of only detaching the host-side client.
+ */
+export const execInSandbox = async (
+  id: string,
+  command: string[],
+  timeoutMs: number,
+): Promise<SandboxResult> => {
+  const seconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+  try {
+    const result = await exec(
+      "docker",
+      ["exec", sandboxName(id), "timeout", "-s", "KILL", String(seconds), ...command],
+      { timeout: timeoutMs + 30_000, maxBuffer: 5_000_000 },
+    );
+    return { exitCode: 0, timedOut: false, output: `${result.stdout}\n${result.stderr}` };
+  } catch (error) {
+    const failure = error as { code?: unknown; stdout?: string; stderr?: string; killed?: boolean };
+    // Docker itself failed (no daemon, container gone): not the command's result.
+    if (
+      typeof failure.code !== "number" ||
+      /Error response from daemon|Cannot connect to the Docker daemon/.test(failure.stderr ?? "")
+    )
+      throw dockerFailure(error);
+    return {
+      exitCode: failure.code,
+      // `timeout -s KILL` exits 137 when it had to kill the command.
+      timedOut: failure.code === 137 || failure.killed === true,
+      output: `${failure.stdout ?? ""}\n${failure.stderr ?? ""}`,
+    };
+  }
+};
+
 export const hashFile = async (filePath: string) =>
   crypto
     .createHash("sha256")

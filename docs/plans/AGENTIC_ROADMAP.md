@@ -12,7 +12,7 @@ The existing plumbing stays: Docker sandbox, LangGraph run graph, snapshot-bound
 | --- | --- | --- | --- | --- |
 | 0. Coding evaluation + prompt management | We can't tell whether the agent writes correct code, or whether a change made it better or worse. | A benchmark of 8 realistic bugs scored by hidden tests the agent never sees; prompts move to versioned files so every result is tied to the exact prompts used. | M | Done (baseline 2026-10-25: 6/8 pass, 1 wrong fix shipped) |
 | 1. Provider registry + tool calling in the LLM layer | Each new LLM needs its own code and edits in several places, and the LLM layer can only send text and get text back, so the model can't ask to do anything. | One generic OpenAI-compatible provider configured per vendor (new vendors need configuration only), a single provider registry, then function calling behind one shared format. | M–L | Done; live check pending for Anthropic only (no key yet) |
-| 2. Sandbox tools | The agent only sees files chosen by name, cut at 20 KB, and must rewrite whole files; it can also edit tests. | Give it safe tools inside the Docker sandbox (list, read, search, edit, run checks) with the safety rules enforced in each tool, and log every call. | M | Not started |
+| 2. Sandbox tools | The agent only sees files chosen by name, cut at 20 KB, and must rewrite whole files; it can also edit tests. | Give it safe tools inside the Docker sandbox (list, read, search, edit, run checks) with the safety rules enforced in each tool, and log every call. | M | Done (tools built and tested; used from Phase 3) |
 | 3. Agent loop | The agent gets one shot per attempt and can't explore, check its work or change course. | A loop where the model picks a tool, sees the result and decides the next step, until it finishes or hits a step/token/time budget; the existing checks still run after it. | L | Not started |
 | 4. Parallel executions (several tickets at once) | Tickets run one after another, so one slow ticket holds up the rest. | Allow several runs at once with limits on runs, CPU/memory and LLM rate, keep each run isolated, and let workers scale as separate processes. | M–L | Not started |
 | 5. Agent roles and a real planner | Every step uses the project's first agent, and plan approval reviews a fixed template. | Give agents roles (planner, implementer, reviewer) picked per step, and add a planner that reads the repo and proposes a real plan to approve. | M | Not started |
@@ -187,18 +187,29 @@ Tool calling done 2026-10-25 (`generateWithTools` in `LLMService` and each provi
 
 ### Tasks
 
-- [ ] Long-lived container per run (`docker run -d` + `docker exec`) instead of a new container per command, with the same CPU/memory/PID limits and no network
-- [ ] `list_files`
-- [ ] `read_file(path, startLine, endLine)`: range reads remove the 20 KB cut-off
-- [ ] `search_code(pattern)`: `git grep` inside the sandbox; content search instead of file-name matching
-- [ ] `edit_file(path, oldText, newText)`: targeted replacement instead of whole-file rewrites; fails if `oldText` is missing or not unique
-- [ ] `run_check(script)`: only scripts listed in `Repository.verificationConfig`
-- [ ] `finish(summary)`
-- [ ] Policy inside the tools: existing path checks (no `.git`, no symlinks, no escaping the root), protected paths **including existing test files**, output caps, per-tool timeouts. Denials are returned to the model as results, not thrown
-- [ ] Record every call in the existing, currently unused `ToolCall` table (`REQUESTED/RUNNING/COMPLETED/DENIED/FAILED`)
-- [ ] Unit tests for each tool's policy (path escape, protected test file, oversized output, unknown script)
+- [x] Long-lived container per run (`docker run -d` + `docker exec`) instead of a new container per command, with the same CPU/memory/PID limits and no network
+- [x] `list_files`
+- [x] `read_file(path, startLine, endLine)`: range reads remove the 20 KB cut-off
+- [x] `search_code(pattern)`: `git grep` inside the sandbox; content search instead of file-name matching
+- [x] `edit_file(path, oldText, newText)`: targeted replacement instead of whole-file rewrites; fails if `oldText` is missing or not unique
+- [x] `run_check(script)`: only scripts listed in `Repository.verificationConfig`
+- [x] `finish(summary)`
+- [x] Policy inside the tools: existing path checks (no `.git`, no symlinks, no escaping the root), protected paths **including existing test files**, output caps, per-tool timeouts. Denials are returned to the model as results, not thrown
+- [x] Record every call in the existing, currently unused `ToolCall` table (`REQUESTED/RUNNING/COMPLETED/DENIED/FAILED`)
+- [x] Unit tests for each tool's policy (path escape, protected test file, oversized output, unknown script)
 
 **Done when:** every tool works and is policy-tested against a local workspace, with calls visible in `ToolCall`.
+
+Done 2026-10-26 (`src/services/sandbox/`, `startSandbox`/`execInSandbox`/`stopSandbox` in `workspaceService.ts`, `tests/sandboxTools.test.js`). Decisions made while building it:
+
+- **File tools run on the host, over the bind-mounted workspace; only `run_check` runs in the container.** Reads are as dangerous as writes there, so every file tool applies the same rules (inside the root, no `.git`, no symlinks anywhere on the path: a committed link could point at a host file). The symlink test runs for real on Windows (junction).
+- **`search_code` is a plain-text, case-insensitive search instead of `git grep` with a pattern:** a model-supplied regex run on the host could hang it, and it needs no container.
+- **Existing test files cannot be edited; new test files can,** and the agent may keep editing a test it created. In the baseline the agent added regression tests to existing test files, which this now forbids; it has to put them in a new file.
+- **`finish(status, summary)` takes `done` or `blocked`,** so an impossible or unsafe ticket ends with a stated reason instead of exhausting attempts (baseline scenario 8).
+- `run_check`'s time limit is enforced inside the container (`timeout -s KILL`), so a runaway test is killed there, not just detached. Live check: pass/fail exit codes, no network, a 30 s sleep killed at 3 s, container removed on stop.
+- `ToolCall.policy` stores the policy in force (protected paths, allowed scripts) and, for a denial, why. Checked live against the local database.
+
+The tools are not used by the run graph yet; Phase 3 wires them into the agent loop.
 
 ---
 
