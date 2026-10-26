@@ -538,7 +538,7 @@ artifacts/              approved diffs, one per execution
 ## Known limits
 
 - **One tracker, one source host.** Trello is the only issue tracker and GitHub the only source control. Trackers are pluggable (`IssueTrackerAdapter`); source control is not yet (AUDIT A2).
-- **Node/TypeScript repositories only**, verified through their npm scripts.
+- **Node/TypeScript repositories only for now**, verified through their npm scripts. Support for any language, framework and platform is the next phase (Phase 4 of `docs/plans/AGENTIC_ROADMAP.md`).
 - **Repository context is selected by file name.** The agent sees up to 12 files whose paths match ticket words, each cut at 20 KB, and returns whole files. Vague tickets and very large files are weak spots.
 - **The agent can modify existing tests.** The coding benchmark's hidden tests catch this when measuring; nothing blocks it in a normal run yet (Phase 2 of `docs/plans/AGENTIC_ROADMAP.md`).
 - **One HTTP connector**, not a full Model Context Protocol transport. Skills and MCP resources are stored and assignable but not yet included in prompts.

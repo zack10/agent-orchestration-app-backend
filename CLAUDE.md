@@ -32,6 +32,14 @@ New test files must be added to the explicit list in the `test` script in `packa
 
 The coding benchmark (`tests/e2e/codingEval.js`) uses `tests/e2e/coding-scenarios/`: `repo/` is the clean project, each `NN-*/` has `scenario.json`, `bug/` (files planting the bug) and `hidden.test.js`. Hidden tests must never be pushed to the sandbox repo. `tests/codingScenarios.test.js` (in `npm test`) proves each scenario is valid; keep it passing when editing scenarios.
 
+## Language-agnostic requirement
+
+The agent must work on repositories in **any language, framework and platform** (PHP, Java, Python, Go, Rust, .NET, Node, ...), not only Node/TypeScript. Today the execution pipeline is still Node-only (`node:20` sandbox image, `npm ci`, `npm run <script>` checks, `package.json`-based context, prompts that say "Node/TypeScript"); removing that is Phase 4 of `docs/plans/AGENTIC_ROADMAP.md`. Until then, and in all new work:
+
+- Never hard-code a language, package manager, build tool, test runner or test-file pattern in new code or prompts; take it from the repository's detected or configured toolchain.
+- Prompts say "a checked-out repository" and get the language and check commands as variables.
+- When changing Node-specific code (`workspaceService.ts`, `run_check`, `verifyWorkspace`, `repoContext.ts`, default protected paths), move it toward the toolchain model instead of extending the npm path.
+
 ## Architecture
 
 Express/TypeScript API (port 3001) on Prisma 7 + PostgreSQL, with RabbitMQ for async work. `src/index.ts` wires middleware (`securityHeaders` → CORS → `authenticate` → `rateLimit` on `/api`), then starts background loops: RabbitMQ connection, task queue worker, message recovery, execution workers, outbox flusher, Trello polling. If RabbitMQ is unavailable in non-production, the API still starts in degraded mode.
