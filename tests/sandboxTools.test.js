@@ -6,6 +6,7 @@ const test = require("node:test");
 
 const { SANDBOX_TOOLS, executeTool } = require("../dist/services/sandbox/tools");
 const { runRecordedTool } = require("../dist/services/sandbox/toolRunner");
+const { fsRepoFiles, isTestFile, resolveToolchain } = require("../dist/services/toolchain");
 
 /** A throwaway repository: src, an existing test, a protected file, git metadata. */
 const workspace = (t, overrides = {}) => {
@@ -24,14 +25,16 @@ const workspace = (t, overrides = {}) => {
     fs.writeFileSync(path.join(root, file), content);
   }
   const checks = [];
+  const { toolchain } = resolveToolchain(fsRepoFiles(root), {});
   const ctx = {
     root,
     protectedPaths: ["package.json", "package-lock.json", ".github"],
     checkScripts: ["test"],
-    runCheck: async (script) => {
-      checks.push(script);
+    runCheck: async (check) => {
+      checks.push(check);
       return { exitCode: 1, timedOut: false, output: "1 failing: expected 3, got -1" };
     },
+    isTestFile: (file) => isTestFile(toolchain, file),
     createdFiles: new Set(),
     ...overrides,
   };
@@ -140,24 +143,24 @@ test("search_code finds plain text case-insensitively and caps matches", async (
   assert.match((await run(ctx, "search_code", { query: "needle" })).output, /stopped at 100 matches/);
 });
 
-test("run_check runs only configured scripts and keeps the end of long output", async (t) => {
+test("run_check runs only available checks and keeps the end of long output", async (t) => {
   const { ctx, checks } = workspace(t);
-  const unknown = await run(ctx, "run_check", { script: "deploy" });
+  const unknown = await run(ctx, "run_check", { check: "deploy" });
   assert.equal(unknown.status, "DENIED");
-  assert.match(unknown.output, /Allowed: test/);
-  assert.deepEqual(checks, [], "a denied script never reaches the sandbox");
+  assert.match(unknown.output, /Available: test/);
+  assert.deepEqual(checks, [], "a denied check never reaches the sandbox");
 
-  const result = await run(ctx, "run_check", { script: "test" });
+  const result = await run(ctx, "run_check", { check: "test" });
   assert.equal(result.status, "COMPLETED");
-  assert.match(result.output, /^npm run test: FAILED \(exit code 1\)\n1 failing/);
+  assert.match(result.output, /^test check: FAILED \(exit code 1\)\n1 failing/);
 
   ctx.runCheck = async () => ({ exitCode: 0, timedOut: false, output: `${"x".repeat(30_000)}\nLAST LINE` });
-  const long = await run(ctx, "run_check", { script: "test" });
+  const long = await run(ctx, "run_check", { check: "test" });
   assert.match(long.output, /^\[output truncated/);
   assert.match(long.output, /LAST LINE$/);
 
   ctx.runCheck = async () => ({ exitCode: 137, timedOut: true, output: "" });
-  assert.match((await run(ctx, "run_check", { script: "test" })).output, /TIMED OUT/);
+  assert.match((await run(ctx, "run_check", { check: "test" })).output, /TIMED OUT/);
 });
 
 test("finish reports the agent's verdict; unknown tools and bad arguments are results", async (t) => {

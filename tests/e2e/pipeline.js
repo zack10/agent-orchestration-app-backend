@@ -94,12 +94,30 @@ const ensureFixtures = async () => {
   if (agent) await api("PUT", `/api/agents/${agent.id}`, { body: agentBody, expectStatus: 200 });
   else await api("POST", "/api/agents", { body: { ...agentBody, projectId: project.id }, expectStatus: 201 });
 
-  // Repositories are unique by owner/name, so reuse one if it already exists.
+  // The sandbox repository's environment, as a person would approve it: the
+  // benchmark project is Node, so it runs npm in a Node image. E2E_ENVIRONMENT
+  // (JSON verificationConfig) replaces it for a repository in another stack.
+  const verificationConfig = process.env.E2E_ENVIRONMENT
+    ? JSON.parse(process.env.E2E_ENVIRONMENT)
+    : {
+        toolchain: {
+          image: "node:20-bookworm",
+          setup: ["npm", "ci", "--ignore-scripts"],
+          checks: { test: ["npm", "test"] },
+          protectedPaths: ["package.json", "package-lock.json", ".github"],
+        },
+      };
+
+  // Repositories are unique by owner/name, so reuse one if it already exists,
+  // updating its environment when it differs.
   const owner = env("E2E_GITHUB_OWNER");
   const name = env("E2E_GITHUB_REPO");
   const { data: repositories } = await api("GET", "/api/repositories", { expectStatus: 200 });
+  const existing = repositories.find((candidate) => candidate.owner === owner && candidate.name === name);
+  if (existing && JSON.stringify(existing.verificationConfig) !== JSON.stringify(verificationConfig))
+    await api("PATCH", `/api/repositories/${existing.id}`, { body: { verificationConfig }, expectStatus: 200 });
   const repository =
-    repositories.find((candidate) => candidate.owner === owner && candidate.name === name) ??
+    existing ??
     (
       await api("POST", "/api/repositories", {
         body: {
@@ -108,7 +126,7 @@ const ensureFixtures = async () => {
           name,
           defaultBranch: env("E2E_GITHUB_DEFAULT_BRANCH", "main"),
           githubInstallationId: env("E2E_GITHUB_INSTALLATION_ID"),
-          verificationConfig: { scripts: env("E2E_VERIFY_SCRIPTS", "test").split(",").map((s) => s.trim()) },
+          verificationConfig,
           executionPolicy: { maxChangedFiles: 5 },
         },
         expectStatus: 201,

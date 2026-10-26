@@ -15,6 +15,7 @@ Built on PostgreSQL + Prisma, RabbitMQ, LangGraph, and pluggable LLM providers (
 - [Reliable messaging](#reliable-messaging)
 - [Data model](#data-model)
 - [Security model](#security-model)
+- [Repository environment](#repository-environment)
 - [Setting up the Trello → GitHub workflow](#setting-up-the-trello--github-workflow)
 - [API reference](#api-reference)
 - [Configuration](#configuration)
@@ -77,7 +78,7 @@ flowchart LR
 
     pg[("PostgreSQL")]
     mq[["RabbitMQ<br/>agent_exchange"]]
-    docker["Docker workspace<br/>node:20-bookworm"]
+    docker["Docker workspace<br/>repository image"]
 
     client -->|HTTPS + Bearer token| api
     api --> pg
@@ -148,9 +149,9 @@ sequenceDiagram
     Human->>API: POST /approvals/plan {snapshotHash}
     API->>G: run worker claims execution (lease)
     G->>GH: base SHA + installation token
-    G->>D: clone at base SHA, npm ci --ignore-scripts
+    G->>D: clone at base SHA, resolve environment, setup (no token)
     G->>L: internal plan, then file edits
-    G->>D: write files, run verification scripts (network off)
+    G->>D: write files, run the repository's checks (network off)
     G->>L: review the diff
     G->>API: store DIFF artifact → AWAITING_PUBLISH_APPROVAL
     Human->>API: POST /approvals/publish {snapshotHash = diff hash}
@@ -342,7 +343,7 @@ erDiagram
 - Raw LLM output is not stored unless `STORE_RAW_LLM_OUTPUT=true`.
 
 **Repository execution**
-- Verification runs in `node:20-bookworm` with `--network none`, CPU/memory/PID limits, and `npm ci --ignore-scripts`.
+- Verification runs in the repository's image with `--network none` and CPU/memory/PID limits. Only the setup step has network, and it never gets the GitHub token.
 - Generated file writes reject `.git` paths and any path through a symlink.
 - Diff review rejects added secrets (GitHub, OpenAI, AWS, Google, Slack tokens, credentials in URLs).
 - Publishing never pushes the verification workspace: it clones fresh at the recorded base SHA, applies only the approved diff, and commits and pushes with git hooks disabled.
@@ -355,10 +356,39 @@ erDiagram
 **LLM output**
 - Responses that hit `LLM_MAX_OUTPUT_TOKENS`, are blocked, or are empty raise an error instead of being parsed as partial output.
 
+## Repository environment
+
+There is no list of supported languages: any language, framework or platform works, the way it does for GitHub Copilot's coding agent or OpenAI Codex. Each repository has an environment (an image, a setup command and named checks), taken in this order:
+
+1. **The repository's configuration** (`verificationConfig.toolchain`, set with `POST` or `PATCH /api/repositories`).
+2. **The project's own devcontainer** (`.devcontainer/devcontainer.json` or `.devcontainer.json`): its `image`, `containerEnv`/`remoteEnv`, and its `onCreateCommand`, `updateContentCommand` and `postCreateCommand` as setup. Devcontainers that build a Dockerfile, use Docker Compose or add features aren't supported yet; what was skipped is reported.
+3. **The default image**, `EXECUTION_DEFAULT_IMAGE` (`mcr.microsoft.com/devcontainers/universal:2`, GitHub Codespaces' default, with the common languages installed). Pinned by digest; a 3.8 GB download (15 GB on disk), once per server. It has no Rust toolchain: a Rust repository needs its own image.
+
+We never write an environment into the user's project. Checks only come from the repository's configuration: a repository with none still gets changes, but the draft PR is marked **Unverified**. (A discovery step that proposes the checks for a person to approve once is planned; see the roadmap.) What was used, and why, is recorded as a `GRAPH_TOOLCHAIN_RESOLVED` event.
+
+```json
+{
+  "scripts": ["test"],
+  "toolchain": {
+    "image": "maven:3.9-eclipse-temurin-21",
+    "setup": ["mvn", "-B", "-q", "dependency:resolve"],
+    "checks": { "build": ["mvn", "-B", "-q", "-DskipTests", "package"], "test": ["mvn", "-B", "-q", "test"] },
+    "protectedPaths": ["pom.xml", ".github"]
+  }
+}
+```
+
+- `setup` runs once after cloning, with network but never the GitHub token. Then each check runs once on the unmodified code, still with network, so whatever a tool only downloads when it really runs (test providers, plugins, modules) is there later. Those results are recorded as the baseline (`GRAPH_BASELINE_CHECKED`). Checks need no offline flags: later runs simply have no network.
+- `checks` run with no network, after the agent finishes, and decide whether the change passes. `scripts` picks which ones run; a name with no check is reported as "not available", not as a failure.
+- After that, the container is saved as a snapshot image (`docker commit`), and checks and the agent's sandbox run from it. Whatever setup installed outside the repository (`~/.m2`, `~/.cache/pip`, system packages) is kept without knowing any tool. The snapshot is deleted with the workspace.
+- Files a check creates (`__pycache__`, `target/`, coverage) are never part of the change either.
+- `testFilePatterns` (regular expressions) replace the default conventions (`tests/`, `*.test.*`, `*_test.*`, `test_*`, `*Test.*`, ...). Existing tests may not be edited; new ones may.
+- `protectedPaths` default to CI and devcontainer files.
+
 ## Setting up the Trello → GitHub workflow
 
 1. **GitHub App**: create one with *Contents* and *Pull requests* read/write, install it on the target repository, and set `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` (PEM on one line with `\n`).
-2. **Repository record**: `POST /api/repositories` with owner, name, installation ID and `verificationConfig`, e.g. `{ "scripts": ["lint", "build", "test"] }` (scripts must exist in that repo).
+2. **Repository record**: `POST /api/repositories` with owner, name and installation ID. Set its environment in `verificationConfig` (see [Repository environment](#repository-environment)); without checks, its PRs are marked Unverified.
 3. **Trello integration**: `POST /api/integrations` with `type: "TRELLO"` and config `apiKey`, `token`, `boardId`, `eligibleLabel`, `repositoryId`.
 4. **Agent**: `POST /api/agents` in the same project with `provider`, `model` and `config.apiKey`. The run uses the project's first agent.
 5. Label a card, then wait for the poller or call `POST /api/integrations/:id/sync`.
@@ -383,7 +413,7 @@ All routes are under `/api` and require the bearer token.
 | Skills | `POST/GET /skills`, `GET/PUT/DELETE /skills/:id`, `POST /skills/assign` |
 | Tasks | `POST /tasks` (202, `Idempotency-Key`), `GET /tasks`, `GET /tasks/:id` |
 | LLM | `GET /llm/providers`, `POST /llm/discover`, `GET /llm/models` (`X-Provider-Api-Key`), `GET /llm/usage`, `GET /llm/usage/today` (tokens used today against `LLM_DAILY_TOKEN_LIMIT`) |
-| Repositories | `POST/GET /repositories` |
+| Repositories | `POST/GET /repositories`, `PATCH /repositories/:id` (environment, policy) |
 | Integrations | `POST/GET /integrations`, `POST /integrations/:id/sync` |
 | Work items | `GET /work-items`, `GET /work-items/:id` |
 | Executions | `POST/GET /executions`, `GET /executions/:id`, `POST /executions/:id/plans`, `POST /executions/:id/approvals/plan\|publish` |

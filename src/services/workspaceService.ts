@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { config } from "../config";
+import { SANDBOX_ROOT, Toolchain } from "./toolchain";
 
 const exec = promisify(execFile);
 const safeId = (id: string) => {
@@ -22,6 +23,7 @@ export const createWorkspace = async (id: string) => {
 };
 export const removeWorkspace = async (id: string) => {
   const root = workspacePath(id);
+  await removeEnvironmentSnapshot(id);
   try {
     await fs.rm(root, { recursive: true, force: true });
   } catch (error) {
@@ -60,14 +62,21 @@ const SAFE_GIT_ARGS = [
 // is never written to .git/config or placed on the docker command line.
 const AUTH_GIT = `${SAFE_GIT} -c http.extraHeader="Authorization: Basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"`;
 
-const SANDBOX_IMAGE = "node:20-bookworm";
+// Clone, diff, reset and cleanup only: any image with git and a shell. The
+// repository's own commands run in its toolchain's image instead.
+const GIT_IMAGE = "node:20-bookworm";
 const LIMIT_ARGS = ["--cpus", "2", "--memory", "2g", "--pids-limit", "256"];
+const SETUP_TIMEOUT_MS = 900_000;
+
+const envArgs = (env: Record<string, string> = {}) =>
+  Object.entries(env).flatMap(([name, value]) => ["-e", `${name}=${value}`]);
 
 const dockerArgs = (
   root: string,
   network: boolean,
   withToken: boolean,
   command: string[],
+  options: { image?: string; env?: Record<string, string> } = {},
 ) => [
   "run",
   "--rm",
@@ -76,11 +85,12 @@ const dockerArgs = (
   network ? "bridge" : "none",
   // `-e NAME` without a value makes docker read it from our process env.
   ...(withToken ? ["-e", "GITHUB_TOKEN"] : []),
+  ...envArgs(options.env),
   "-v",
-  `${root}:/workspace`,
+  `${root}:${SANDBOX_ROOT}`,
   "-w",
-  "/workspace",
-  SANDBOX_IMAGE,
+  SANDBOX_ROOT,
+  options.image ?? GIT_IMAGE,
   ...command,
 ];
 
@@ -107,10 +117,10 @@ const dockerFailure = (error: unknown, token?: string) => {
   );
 };
 
-const execDocker = async (args: string[], token?: string) => {
+const execDocker = async (args: string[], token?: string, timeout = 300_000) => {
   try {
     return await exec("docker", args, {
-      timeout: 300_000,
+      timeout,
       maxBuffer: 5_000_000,
       env: token ? { ...process.env, GITHUB_TOKEN: token } : process.env,
     });
@@ -146,17 +156,125 @@ export const cloneGithubWorkspace = async (
   // Start from an empty directory so a partial earlier clone cannot wedge retries.
   await removeWorkspace(id);
   const root = await createWorkspace(id);
-  const script = `${AUTH_GIT} clone https://github.com/${owner}/${repo}.git . && ${SAFE_GIT} checkout ${sha} && npm ci --ignore-scripts`;
+  const script = `${AUTH_GIT} clone https://github.com/${owner}/${repo}.git . && ${SAFE_GIT} checkout ${sha}`;
   await execDocker(dockerArgs(root, true, true, ["sh", "-c", script]), token);
+};
+
+/** Untracked files git doesn't ignore; `directories` collapses whole new folders. */
+const untrackedFiles = async (id: string, directories = false) =>
+  (
+    await runDocker(id, [
+      ...SAFE_GIT_ARGS,
+      "ls-files",
+      "-z",
+      "--others",
+      "--exclude-standard",
+      ...(directories ? ["--directory"] : []),
+    ])
+  ).stdout
+    .split("\0")
+    .filter(Boolean);
+
+const excludeFromDiffs = async (id: string, entries: string[]) => {
+  if (entries.length)
+    await fs.appendFile(
+      path.join(workspacePath(id), ".git", "info", "exclude"),
+      entries.map((entry) => `/${entry.replace(/([*?[\\!#])/g, "\\$1")}\n`).join(""),
+    );
+};
+
+/**
+ * Runs `work` (a check) and keeps whatever it creates out of diffs and
+ * resets: build output and caches a check writes (__pycache__, target/,
+ * coverage) are never part of the change, whatever the language.
+ */
+export const keepOutputOutOfDiffs = async <T>(id: string, work: () => Promise<T>) => {
+  const before = new Set(await untrackedFiles(id));
+  try {
+    return await work();
+  } finally {
+    await excludeFromDiffs(
+      id,
+      (await untrackedFiles(id)).filter((file) => !before.has(file)),
+    );
+  }
+};
+
+const setupContainer = (id: string) => `agent-setup-${safeId(id).toLowerCase()}`;
+const snapshotImage = (id: string) => `agent-env-${safeId(id).toLowerCase()}`;
+
+/** Deletes an execution's environment snapshot, if it has one. */
+export const removeEnvironmentSnapshot = async (id: string) => {
+  for (const args of [["rm", "-f", setupContainer(id)], ["rmi", "-f", snapshotImage(id)]])
+    await exec("docker", args).catch(() => undefined);
+};
+
+/** How a check did on the unmodified code, during setup. */
+export interface BaselineResult {
+  check: string;
+  passed: boolean;
+  output: string;
+}
+
+/**
+ * Prepares the environment and returns the image every later command uses.
+ * In one container with network (package registries) but never the GitHub
+ * token, since this runs repository-controlled code:
+ *
+ * 1. the repository's setup command, if any;
+ * 2. each check once, on the unmodified code. Tools fetch some things only
+ *    when they really run (test-framework providers, plugins, modules), and
+ *    the later checks have no network. The results are the baseline: how the
+ *    code did before the agent changed anything.
+ *
+ * Tools install to different places (~/.m2, ~/.cache, /usr/local), so the
+ * container is then snapshotted with `docker commit` instead of knowing any
+ * of them; the workspace is a bind mount, so it is not in the snapshot.
+ * Whatever this created inside the workspace is excluded from diffs.
+ */
+export const setupWorkspace = async (
+  id: string,
+  toolchain: Toolchain,
+  checks: Array<{ name: string; command: string[] }>,
+) => {
+  const baseline: BaselineResult[] = [];
+  if (!toolchain.setup && !checks.length) return { image: toolchain.image, baseline };
+
+  await removeEnvironmentSnapshot(id);
+  const args = dockerArgs(workspacePath(id), true, false, ["sleep", "infinity"], {
+    image: toolchain.image,
+    env: toolchain.env,
+  });
+  // Same limits as every container, but long-lived so it can be committed.
+  args.splice(args.indexOf("--rm"), 1, "-d", "--name", setupContainer(id));
+  const run = (command: string[]) =>
+    execDocker(["exec", setupContainer(id), ...command], undefined, SETUP_TIMEOUT_MS);
+  try {
+    await execDocker(args);
+    if (toolchain.setup) await run(toolchain.setup);
+    for (const { name, command } of checks)
+      try {
+        const result = await run(command);
+        baseline.push({ check: name, passed: true, output: `${result.stdout}\n${result.stderr}`.slice(-4000) });
+      } catch (error) {
+        baseline.push({ check: name, passed: false, output: (error as Error).message.slice(-4000) });
+      }
+    await execDocker(["commit", setupContainer(id), snapshotImage(id)]);
+  } finally {
+    await exec("docker", ["rm", "-f", setupContainer(id)]).catch(() => undefined);
+  }
+  // A fresh clone has no untracked files, so everything here came from setup.
+  await excludeFromDiffs(id, await untrackedFiles(id, true));
+  return { image: snapshotImage(id), baseline };
 };
 /**
  * Commands that return a clone to its checked-out commit: tracked changes,
- * intent-to-add entries and new files are dropped. Ignored files (installed
- * node_modules) are kept so retries don't reinstall dependencies.
+ * intent-to-add entries and new files are dropped. Ignored files (what
+ * setup installed, tool caches) are kept so retries don't set up again.
  */
 export const WORKSPACE_RESET_COMMANDS = [
   [...SAFE_GIT_ARGS, "reset", "--hard", "--quiet"],
-  [...SAFE_GIT_ARGS, "clean", "-fd", "--quiet", "-e", "node_modules"],
+  [...SAFE_GIT_ARGS, "clean", "-fd", "--quiet"],
 ];
 export const resetWorkspace = async (id: string) => {
   for (const command of WORKSPACE_RESET_COMMANDS) await runDocker(id, command);
@@ -224,29 +342,73 @@ export const publishApprovedDiff = async (input: {
     await removeWorkspace(publishId);
   }
 };
-export const verifyWorkspace = async (id: string, scripts: string[]) => {
-  const results: Array<{ script: string; passed: boolean; output: string }> =
-    [];
-  for (const script of scripts)
+export interface CheckResult {
+  script: string;
+  passed: boolean;
+  output: string;
+  /** Configured, but the toolchain has no command for it. */
+  unavailable?: true;
+}
+
+/**
+ * Runs the toolchain's checks in its image, without network, stopping at
+ * the first failure. A configured check that doesn't exist is recorded as
+ * unavailable and does not fail the verification: it says nothing about
+ * the change.
+ */
+export const verifyWorkspace = async (
+  id: string,
+  toolchain: Toolchain,
+  checks: { run: Array<{ name: string; command: string[] }>; unavailable: string[] },
+) => {
+  const results: CheckResult[] = checks.unavailable.map((script) => ({
+    script,
+    passed: true,
+    unavailable: true,
+    output: `No "${script}" check is configured for this repository.`,
+  }));
+  let failed = false;
+  for (const { name, command } of checks.run)
     try {
-      const result = await runDocker(id, ["npm", "run", script]);
+      const result = await keepOutputOutOfDiffs(id, () =>
+        execDocker(
+          dockerArgs(workspacePath(id), false, false, command, {
+            image: toolchain.image,
+            env: toolchain.env,
+          }),
+        ),
+      );
       results.push({
-        script,
+        script: name,
         passed: true,
         output: `${result.stdout}\n${result.stderr}`.slice(-100_000),
       });
     } catch (error) {
       const output = error instanceof Error ? error.message : String(error);
-      results.push({ script, passed: false, output });
+      results.push({ script: name, passed: false, output });
+      failed = true;
       break;
     }
-  return {
-    passed:
-      results.length === scripts.length &&
-      results.every((result) => result.passed),
-    results,
-  };
+  return { passed: !failed, checksRun: checks.run.length, results };
 };
+/** What a verification proved, for the PR body: which checks passed, and which did not exist. */
+export const describeVerification = (verification: unknown) => {
+  const { checksRun, results } = (verification ?? {}) as {
+    checksRun?: number;
+    results?: CheckResult[];
+  };
+  const ran = (results ?? []).filter((result) => !result.unavailable).map((result) => result.script);
+  const unavailable = (results ?? []).filter((result) => result.unavailable).map((result) => result.script);
+  // Artifacts from before toolchains have results but no checksRun.
+  const lines = [
+    !(checksRun ?? ran.length)
+      ? "**Unverified:** no checks are available for this repository, so nothing was run against this change."
+      : `Checks passed: ${ran.join(", ")}.`,
+  ];
+  if (unavailable.length) lines.push(`Not available in this repository: ${unavailable.join(", ")}.`);
+  return lines.join("\n");
+};
+
 /**
  * Long-lived sandbox for one run: started once, then each command is a
  * `docker exec`, instead of a new container per command. Same limits as
@@ -254,7 +416,7 @@ export const verifyWorkspace = async (id: string, scripts: string[]) => {
  */
 const sandboxName = (id: string) => `agent-sandbox-${safeId(id)}`;
 
-export const startSandbox = async (id: string) => {
+export const startSandbox = async (id: string, toolchain: Toolchain) => {
   // A crashed earlier attempt may have left one behind.
   await stopSandbox(id);
   await execDocker([
@@ -265,11 +427,13 @@ export const startSandbox = async (id: string) => {
     ...LIMIT_ARGS,
     "--network",
     "none",
+    // `docker exec` inherits these, so every command sees the toolchain's caches.
+    ...envArgs(toolchain.env),
     "-v",
-    `${workspacePath(id)}:/workspace`,
+    `${workspacePath(id)}:${SANDBOX_ROOT}`,
     "-w",
-    "/workspace",
-    SANDBOX_IMAGE,
+    SANDBOX_ROOT,
+    toolchain.image,
     "sleep",
     "infinity",
   ]);

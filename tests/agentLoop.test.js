@@ -182,9 +182,9 @@ test("the repository overview lists relevant files without their contents", asyn
   fs.writeFileSync(path.join(root, "src/pagination.js"), "const SECRET_BODY = 1;\n");
   fs.writeFileSync(path.join(root, "package.json"), '{ "scripts": { "test": "node --test" } }');
 
-  const context = await collectRepoContext(root, "paginate skips the first page in pagination.js");
+  const context = await collectRepoContext(root, "paginate skips the first page in pagination.js", { language: "JavaScript/TypeScript (Node)", checks: { test: ["npm", "run", "test"] } });
   assert.match(context.summary, /SECRET_BODY/, "single-shot mode still gets the contents");
   assert.doesNotMatch(context.overview, /SECRET_BODY/);
   assert.match(context.overview, /Files that look relevant to the ticket: .*src\/pagination\.js/);
-  assert.match(context.overview, /Package scripts: test/);
+  assert.match(context.overview, /Checks: test/);
 });

@@ -45,10 +45,11 @@ test("repo context selects likely relevant files", async () => {
     "export const syncTrello = () => undefined;\n",
   );
 
-  const context = await collectRepoContext(root, "Fix Trello sync bug");
+  const context = await collectRepoContext(root, "Fix Trello sync bug", { language: "JavaScript/TypeScript (Node)", checks: { test: ["npm", "run", "test"] } });
 
   assert.ok(context.fileTree.includes("src/trelloAdapter.ts"));
-  assert.ok(context.packageScripts.includes("test"));
+  assert.deepEqual(context.checks, ["test"]);
+  assert.match(context.summary, /Language: JavaScript/);
   assert.ok(context.selectedFiles.includes("src/trelloAdapter.ts"));
   assert.match(context.summary, /src\/trelloAdapter\.ts/);
 });
@@ -63,7 +64,7 @@ test("M5: repo context skips dotfiles and excluded dirs but keeps .env.example",
   await fs.writeFile(path.join(root, "dist", "index.js"), "built\n");
   await fs.writeFile(path.join(root, "index.js"), "source\n");
 
-  const context = await collectRepoContext(root, "Fix env handling");
+  const context = await collectRepoContext(root, "Fix env handling", { language: "unknown", checks: {} });
 
   assert.deepEqual(context.fileTree, [".env.example", "index.js"]);
   assert.doesNotMatch(context.summary, /do-not-send/);

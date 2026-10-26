@@ -29,6 +29,7 @@ import {
   changedFiles,
   cloneGithubWorkspace,
   gitDiff,
+  setupWorkspace,
   removeWorkspace,
   resetWorkspace,
   startSandbox,
@@ -36,6 +37,13 @@ import {
   verifyWorkspace,
   workspacePath,
 } from "../workspaceService";
+import {
+  Toolchain,
+  describeToolchain,
+  fsRepoFiles,
+  resolveToolchain,
+  selectChecks,
+} from "../toolchain";
 import { AgentStopReason, runAgentLoop } from "./agentLoop";
 import { reviewDiffSafety } from "./diffReview";
 import { fileActionsError } from "./outputFormat";
@@ -67,6 +75,8 @@ const ExecutionGraphState = Annotation.Root({
   agentApiKey: Annotation<string | undefined>(),
   ticket: Annotation<string | undefined>(),
   repoContext: Annotation<RepoContext | undefined>(),
+  // How the repository is installed and checked, resolved after cloning.
+  toolchain: Annotation<Toolchain | undefined>(),
   internalPlan: Annotation<string>({
     reducer: (_current, update) => update,
     default: () => "",
@@ -253,6 +263,32 @@ const loadExecutionContext = async (
     baseSha,
     githubToken,
   );
+  // The repository's configuration or the project's own definition decides
+  // the image, setup step and checks; nothing is chosen per language.
+  const resolution = resolveToolchain(
+    fsRepoFiles(workspacePath(execution.id)),
+    execution.repository.verificationConfig,
+  );
+  await graphEvent(execution.id, "GRAPH_TOOLCHAIN_RESOLVED", {
+    source: resolution.source,
+    reason: resolution.reason,
+    notes: resolution.notes,
+    image: resolution.toolchain.image,
+    setup: resolution.toolchain.setup !== null,
+    checks: Object.keys(resolution.toolchain.checks),
+  });
+  // Later commands run in the snapshot taken after setup and the baseline checks.
+  const { image, baseline } = await setupWorkspace(
+    execution.id,
+    resolution.toolchain,
+    selectChecks(resolution.toolchain, execution.repository.verificationConfig).run,
+  );
+  const toolchain = { ...resolution.toolchain, image };
+  // Failures here existed before the agent changed anything.
+  await graphEvent(execution.id, "GRAPH_BASELINE_CHECKED", {
+    results: baseline.map(({ check, passed }) => ({ check, passed })),
+    failing: baseline.filter((result) => !result.passed).map((result) => result.check),
+  });
 
   await prisma.execution.update({
     where: { id: execution.id },
@@ -296,7 +332,13 @@ const loadExecutionContext = async (
     maxSteps,
     maxTokens,
     deadline,
+    toolchain,
   };
+};
+
+const requireToolchain = (state: GraphState) => {
+  if (!state.toolchain) throw new Error("Execution graph is missing the toolchain");
+  return state.toolchain;
 };
 
 const inspectRepository = async (state: typeof ExecutionGraphState.State) => {
@@ -304,11 +346,12 @@ const inspectRepository = async (state: typeof ExecutionGraphState.State) => {
   const repoContext = await collectRepoContext(
     workspacePath(state.executionId),
     state.ticket,
+    requireToolchain(state),
   );
   await graphEvent(state.executionId, "GRAPH_REPOSITORY_INSPECTED", {
     fileTreeCount: repoContext.fileTree.length,
     selectedFiles: repoContext.selectedFiles,
-    packageScripts: repoContext.packageScripts,
+    toolchain: describeToolchain(requireToolchain(state)),
   });
   return { repoContext };
 };
@@ -328,7 +371,7 @@ const planChange = async (state: typeof ExecutionGraphState.State) => {
       summary: parsed.summary ?? "Implement the ticket with minimal changes.",
       filesToEdit: parsed.filesToEdit ?? state.repoContext.selectedFiles,
       risk: parsed.risk ?? "unknown",
-      testStrategy: parsed.testStrategy ?? state.repoContext.packageScripts,
+      testStrategy: parsed.testStrategy ?? state.repoContext.checks,
     },
     null,
     2,
@@ -443,7 +486,8 @@ const agentLoop = async (state: GraphState) => {
     where: { id: state.executionId },
     include: { repository: true },
   });
-  const ctx = executionToolContext(state.executionId, execution.repository);
+  const toolchain = requireToolchain(state);
+  const ctx = executionToolContext(state.executionId, execution.repository, toolchain);
   const recorder = prismaToolCallRecorder(attempt.id);
   const prompt = renderExecutionPrompt("agent", {
     ticket,
@@ -459,7 +503,7 @@ const agentLoop = async (state: GraphState) => {
   // The loop gets what is left of the execution's budget after planning
   // and any earlier attempts.
   const usedBefore = await executionTokensUsed(state);
-  await startSandbox(state.executionId);
+  await startSandbox(state.executionId, toolchain);
   let outcome: Awaited<ReturnType<typeof runAgentLoop>>;
   try {
     outcome = await runAgentLoop(
@@ -547,6 +591,7 @@ const enforceRepositoryPolicy = async (
   const violation = checkRepositoryPolicy(
     files,
     execution.repository.executionPolicy as RepositoryPolicy | null,
+    requireToolchain(state).protectedPaths,
   );
 
   if (violation) {
@@ -582,12 +627,11 @@ const verifyChange = async (state: typeof ExecutionGraphState.State) => {
     where: { id: state.executionId },
     data: { status: "VERIFYING" },
   });
-  const verificationConfig = execution.repository.verificationConfig as {
-    scripts?: string[];
-  };
+  const toolchain = requireToolchain(state);
   const verification = await verifyWorkspace(
     state.executionId,
-    verificationConfig.scripts ?? ["lint", "build", "test"],
+    toolchain,
+    selectChecks(toolchain, execution.repository.verificationConfig),
   );
 
   if (!verification.passed) {
@@ -607,9 +651,13 @@ const verifyChange = async (state: typeof ExecutionGraphState.State) => {
     };
   }
 
+  // Passing with no checks run means unverified, and the reviewer must see that.
   await graphEvent(state.executionId, "GRAPH_VERIFICATION_PASSED", {
     attemptId: state.attemptId,
     attemptNumber: state.attemptNumber,
+    checksRun: verification.checksRun,
+    unavailable: verification.results.filter((result) => result.unavailable).map((result) => result.script),
+    unverified: verification.checksRun === 0,
   });
   return { verification, route: "review" };
 };

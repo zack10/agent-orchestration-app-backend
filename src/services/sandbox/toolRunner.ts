@@ -1,8 +1,9 @@
 import { Prisma } from "@prisma/client";
 import prisma from "../../db";
-import { DEFAULT_PROTECTED_PATHS, RepositoryPolicy } from "../agentGraph/repoPolicy";
+import { RepositoryPolicy } from "../agentGraph/repoPolicy";
 import { ToolCall } from "../llm/types";
-import { execInSandbox, workspacePath } from "../workspaceService";
+import { Toolchain, isTestFile, selectChecks } from "../toolchain";
+import { execInSandbox, keepOutputOutOfDiffs, workspacePath } from "../workspaceService";
 import { CHECK_TIMEOUT_MS, ToolContext, ToolOutcome, ToolStatus, executeTool } from "./tools";
 
 // Stored output is capped; the full output already went to the model.
@@ -71,18 +72,25 @@ export const runRecordedTool = async (
   return outcome;
 };
 
-/** The tool context for an execution, from its repository's settings. */
+/** The tool context for an execution, from its repository's settings and toolchain. */
 export const executionToolContext = (
   executionId: string,
   repository: { executionPolicy: unknown; verificationConfig: unknown },
+  toolchain: Toolchain,
 ): ToolContext => {
   const policy = repository.executionPolicy as RepositoryPolicy | null;
-  const verification = repository.verificationConfig as { scripts?: string[] } | null;
+  const checks = selectChecks(toolchain, repository.verificationConfig).run;
   return {
     root: workspacePath(executionId),
-    protectedPaths: policy?.protectedPaths ?? DEFAULT_PROTECTED_PATHS,
-    checkScripts: verification?.scripts ?? ["lint", "build", "test"],
-    runCheck: (script) => execInSandbox(executionId, ["npm", "run", script], CHECK_TIMEOUT_MS),
+    protectedPaths: policy?.protectedPaths ?? toolchain.protectedPaths,
+    checkScripts: checks.map((check) => check.name),
+    runCheck: (name) => {
+      const check = checks.find((candidate) => candidate.name === name);
+      if (!check) throw new Error(`Unknown check "${name}"`);
+      // What the check writes (build output, caches) is not the agent's change.
+      return keepOutputOutOfDiffs(executionId, () => execInSandbox(executionId, check.command, CHECK_TIMEOUT_MS));
+    },
+    isTestFile: (file) => isTestFile(toolchain, file),
     createdFiles: new Set(),
   };
 };

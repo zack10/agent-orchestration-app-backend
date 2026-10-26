@@ -3,6 +3,8 @@ export interface RepositoryPolicy {
   protectedPaths?: string[];
 }
 
+// Used only when no toolchain is known; normally the toolchain's
+// protectedPaths (its manifests and lockfiles) are the default.
 export const DEFAULT_PROTECTED_PATHS = ["package.json", "package-lock.json", ".github"];
 const DEFAULT_MAX_CHANGED_FILES = 20;
 
@@ -20,9 +22,10 @@ export const isProtectedPath = (file: string, protectedPaths: string[]) =>
 export const checkRepositoryPolicy = (
   files: string[],
   policy: RepositoryPolicy | null | undefined,
+  defaultProtectedPaths = DEFAULT_PROTECTED_PATHS,
 ): string | undefined => {
   const maxChangedFiles = policy?.maxChangedFiles ?? DEFAULT_MAX_CHANGED_FILES;
-  const protectedPaths = policy?.protectedPaths ?? DEFAULT_PROTECTED_PATHS;
+  const protectedPaths = policy?.protectedPaths ?? defaultProtectedPaths;
 
   const issues: string[] = [];
   if (files.length > maxChangedFiles)

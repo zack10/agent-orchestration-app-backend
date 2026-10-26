@@ -14,7 +14,7 @@ import { NonRetryableError, describeError } from "../utils/safeError";
 import { runExecutionGraph } from "./agentGraph/executionGraph";
 import { hashSnapshot, submitPlan } from "./executionService";
 import rabbitMQService from "./rabbitMQService";
-import { publishApprovedDiff } from "./workspaceService";
+import { describeVerification, publishApprovedDiff } from "./workspaceService";
 
 const TERMINAL: ExecutionStatus[] = ["COMPLETED", "BLOCKED", "FAILED", "CANCELED"];
 const RUN_STATES: ExecutionStatus[] = ["RUNNING", "VERIFYING"];
@@ -280,7 +280,7 @@ const publish = async (executionId: string) => {
         ...pullRequestInput,
         title: execution.workItem.title,
         base: repository.defaultBranch,
-        body: `Automated draft for ${execution.workItem.sourceUrl ?? execution.workItem.id}\n\nExecution: ${execution.id}\n\nVerification passed. Human review is required.`,
+        body: `Automated draft for ${execution.workItem.sourceUrl ?? execution.workItem.id}\n\nExecution: ${execution.id}\n\n${describeVerification(diffArtifact.metadata)}\n\nHuman review is required.`,
       });
     }
     await prisma.artifact.create({

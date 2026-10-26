@@ -18,10 +18,12 @@ export interface ToolContext {
   /** Host path of the run's workspace (bind-mounted into the sandbox). */
   root: string;
   protectedPaths: string[];
-  /** Scripts run_check may run: the repository's verification scripts. */
+  /** Checks run_check may run, by name: the repository toolchain's checks. */
   checkScripts: string[];
-  /** Runs `npm run <script>` in the run's sandbox. */
-  runCheck: (script: string) => Promise<SandboxResult>;
+  /** Runs the named check's command in the run's sandbox. */
+  runCheck: (check: string) => Promise<SandboxResult>;
+  /** Whether a repository-relative path is a test file, per the toolchain. */
+  isTestFile: (file: string) => boolean;
   /** Files created by the agent in this run; they are not "existing" tests. */
   createdFiles: Set<string>;
 }
@@ -43,8 +45,22 @@ const MAX_SEARCH_MATCHES = 100;
 const MAX_SEARCH_FILE_BYTES = 1_000_000;
 const MAX_MATCH_LINE_CHARS = 300;
 export const CHECK_TIMEOUT_MS = 300_000;
-const SKIPPED_DIRS = new Set([".git", "node_modules", "dist", "build", "coverage", ".next", ".turbo", ".cache"]);
-const TEST_FILE = /(^|\/)(__tests__|tests?|spec)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
+// Dependencies, caches and build output of the common toolchains.
+const SKIPPED_DIRS = new Set([
+  ".git",
+  "node_modules",
+  "vendor",
+  ".venv",
+  "__pycache__",
+  "target",
+  "dist",
+  "build",
+  "coverage",
+  ".next",
+  ".turbo",
+  ".cache",
+  ".gradle",
+]);
 
 export const SANDBOX_TOOLS: ToolDefinition[] = [
   {
@@ -97,11 +113,12 @@ export const SANDBOX_TOOLS: ToolDefinition[] = [
   },
   {
     name: "run_check",
-    description: "Run one of the repository's verification scripts (npm run <script>) and see its output.",
+    description:
+      "Run one of the repository's checks by name (for example test, lint or build, as configured for its language) and see its output.",
     parameters: {
       type: "object",
-      properties: { script: { type: "string", description: "Script name, e.g. test" } },
-      required: ["script"],
+      properties: { check: { type: "string", description: "Check name, e.g. test" } },
+      required: ["check"],
     },
   },
   {
@@ -128,7 +145,7 @@ const ARGS = {
   }),
   search_code: z.object({ query: z.string().min(1), path: z.string().optional() }),
   edit_file: z.object({ path: z.string(), oldText: z.string(), newText: z.string() }),
-  run_check: z.object({ script: z.string() }),
+  run_check: z.object({ check: z.string() }),
   finish: z.object({ status: z.enum(["done", "blocked"]), summary: z.string().min(1) }),
 };
 
@@ -247,7 +264,7 @@ const editFile = (ctx: ToolContext, args: z.infer<typeof ARGS.edit_file>) => {
     return denied(`"${file}" is protected and cannot be changed. Protected: ${ctx.protectedPaths.join(", ")}.`);
   const exists = fs.existsSync(target.fullPath);
   if (exists && !fs.statSync(target.fullPath).isFile()) return failed(`"${file}" is not a file.`);
-  if (exists && TEST_FILE.test(file) && !ctx.createdFiles.has(file))
+  if (exists && ctx.isTestFile(file) && !ctx.createdFiles.has(file))
     return denied(`"${file}" is an existing test file and cannot be changed. Add new tests in a new file instead.`);
 
   let content: string;
@@ -277,15 +294,15 @@ const editFile = (ctx: ToolContext, args: z.infer<typeof ARGS.edit_file>) => {
 };
 
 const runCheck = async (ctx: ToolContext, args: z.infer<typeof ARGS.run_check>) => {
-  if (!ctx.checkScripts.includes(args.script))
-    return denied(`"${args.script}" is not an allowed check. Allowed: ${ctx.checkScripts.join(", ") || "none"}.`);
-  const result = await ctx.runCheck(args.script);
+  if (!ctx.checkScripts.includes(args.check))
+    return denied(`"${args.check}" is not an available check. Available: ${ctx.checkScripts.join(", ") || "none"}.`);
+  const result = await ctx.runCheck(args.check);
   const verdict = result.timedOut
     ? `TIMED OUT after ${CHECK_TIMEOUT_MS / 1000}s`
     : result.exitCode === 0
       ? "PASSED"
       : `FAILED (exit code ${result.exitCode})`;
-  return completed(cap(`npm run ${args.script}: ${verdict}\n${result.output.trim()}`, "tail"));
+  return completed(cap(`${args.check} check: ${verdict}\n${result.output.trim()}`, "tail"));
 };
 
 /** Runs one tool call. Unknown tools and invalid arguments are FAILED results. */

@@ -38,6 +38,18 @@ export const createRepository = asyncHandler(
     res.status(201).json(repository);
   },
 );
+/** Sets a repository's environment or policy; later executions use it. */
+export const updateRepository = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { verificationConfig, executionPolicy } = req.body;
+    res.json(
+      await prisma.repository.update({
+        where: { id: req.params.id },
+        data: { verificationConfig, executionPolicy },
+      }),
+    );
+  },
+);
 export const listRepositories = asyncHandler(
   async (req: Request, res: Response) => {
     res.json(

@@ -25,6 +25,11 @@ const parseAgentMode = (value: string | undefined): ExecutionAgentMode => {
   );
 };
 
+// GitHub Codespaces' default image (built from github.com/devcontainers/images).
+// Pinned to the version tested on 2026-10-26; update deliberately.
+const DEFAULT_EXECUTION_IMAGE =
+  "mcr.microsoft.com/devcontainers/universal:2@sha256:dca6a985ffbbc74007a13b6f56ac0fbbc5febae081350b66e865a5549338134b";
+
 /** Like parsePositiveInt, but 0 is allowed (it switches a limit off). */
 const parseNonNegativeInt = (
   value: string | undefined,
@@ -116,6 +121,11 @@ export const config = {
     process.env.EXECUTION_MAX_DURATION_SECONDS,
     1800,
   ),
+  // Image for repositories that configure none and have no devcontainer:
+  // a stock image with the common languages, pinned so it never changes
+  // without notice. Mirror it to your own registry for production.
+  executionDefaultImage:
+    process.env.EXECUTION_DEFAULT_IMAGE || DEFAULT_EXECUTION_IMAGE,
   storeRawLlmOutput: process.env.STORE_RAW_LLM_OUTPUT === "true",
 };
 
