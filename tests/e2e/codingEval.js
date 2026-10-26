@@ -325,7 +325,7 @@ const writeReport = (results, meta) => {
         `| ${result.scenario} | ${result.run} | ${OUTCOMES[result.outcome]} | ${result.attempts ?? ""} | ${result.llmCalls ?? ""}${result.loopTokens ? ` (${Math.round(result.loopTokens / 1000)}k tokens)` : ""} | ${Math.round(result.durationMs / 1000)}s | ${cell((result.files ?? []).join(", "))} | ${result.files ? `+${result.linesAdded}/-${result.linesRemoved}` : ""} | ${result.files ? (result.onlyExpectedFiles ? "yes" : "no") : ""} | ${result.files ? (result.testsAdded ? "yes" : "no") : ""} | ${result.files ? (result.testsModified ? "**yes**" : "no") : ""} | ${cell(result.note)} |`,
     ),
     "",
-    "Tokens are not recorded yet (the pipeline does not track usage until Phase 3).",
+    "Tokens are the agent loop's input + output tokens (tool_loop mode only; single-shot calls do not report usage).",
     "",
   ];
   const failures = results.filter((result) => result.gradeOutput);

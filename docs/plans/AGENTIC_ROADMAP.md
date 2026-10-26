@@ -13,7 +13,7 @@ The existing plumbing stays: Docker sandbox, LangGraph run graph, snapshot-bound
 | 0. Coding evaluation + prompt management | We can't tell whether the agent writes correct code, or whether a change made it better or worse. | A benchmark of 8 realistic bugs scored by hidden tests the agent never sees; prompts move to versioned files so every result is tied to the exact prompts used. | M | Done (baseline 2026-10-25: 6/8 pass, 1 wrong fix shipped) |
 | 1. Provider registry + tool calling in the LLM layer | Each new LLM needs its own code and edits in several places, and the LLM layer can only send text and get text back, so the model can't ask to do anything. | One generic OpenAI-compatible provider configured per vendor (new vendors need configuration only), a single provider registry, then function calling behind one shared format. | M–L | Done; live check pending for Anthropic only (no key yet) |
 | 2. Sandbox tools | The agent only sees files chosen by name, cut at 20 KB, and must rewrite whole files; it can also edit tests. | Give it safe tools inside the Docker sandbox (list, read, search, edit, run checks) with the safety rules enforced in each tool, and log every call. | M | Done (tools built and tested; used from Phase 3) |
-| 3. Agent loop | The agent gets one shot per attempt and can't explore, check its work or change course. | A loop where the model picks a tool, sees the result and decides the next step, until it finishes or hits a step/token/time budget; the existing checks still run after it. | L | Built; benchmark pending |
+| 3. Agent loop | The agent gets one shot per attempt and can't explore, check its work or change course. | A loop where the model picks a tool, sees the result and decides the next step, until it finishes or hits a step/token/time budget; the existing checks still run after it. | L | Done |
 | 4. Parallel executions (several tickets at once) | Tickets run one after another, so one slow ticket holds up the rest. | Allow several runs at once with limits on runs, CPU/memory and LLM rate, keep each run isolated, and let workers scale as separate processes. | M–L | Not started |
 | 5. Agent roles and a real planner | Every step uses the project's first agent, and plan approval reviews a fixed template. | Give agents roles (planner, implementer, reviewer) picked per step, and add a planner that reads the repo and proposes a real plan to approve. | M | Not started |
 | 6. Agent skills | Stored skills never reach the agent, so reusable know-how goes unused. | The agent sees a short list of its role's skills and loads the full instructions only when needed; skills guide but never grant permissions. | M | Not started |
@@ -228,7 +228,7 @@ The tools are not used by the run graph yet; Phase 3 wires them into the agent l
 - [x] Update the README run-graph diagram
 - [x] Run an execution end to end in `tool_loop` mode (scenario 01, 2026-10-26)
 - [x] Run the e2e execution suite in `tool_loop` mode (2026-10-26: 16 passed, 1 skipped (auth check, server had auth disabled); the execution test finished in 4 loop steps, 6.7k tokens, and opened draft PR zack10/agent-orchestration-test#5)
-- [ ] Benchmark `tool_loop` and record it next to the baseline (needs more quota than the free tier: see below)
+- [x] Benchmark `tool_loop` and record it next to the baseline (2026-10-26, 8 runs, see the results log)
 
 **Done when:** `tool_loop` completes the e2e execution suite, and its benchmark results are recorded next to the baseline.
 
@@ -243,6 +243,21 @@ The tools are not used by the run graph yet; Phase 3 wires them into the agent l
 - **First pipeline run (2026-10-26),** scenario 01 through the server: correct fix in 7 loop steps, verified, reviewed and turned into a diff artifact; every tool call has a `ToolCall` row (the denied one with its reason) and the sandbox container was removed. It used 85k tokens because each step re-sends about 11k tokens of prompt, mostly the repository context that `inspect_repo` collects for single-shot mode. In tool-loop mode the agent can read files itself, so an `agent.v2` that sends a short file list instead would cut tokens per step sharply; to try with the benchmark.
 - **`agent.v2` (2026-10-26):** `inspect_repo` now also builds an `overview` (file tree, scripts and the names of the files that look relevant, no contents), and `agent.v2` sends that instead of the full context. On scenario 01 it used 23k tokens instead of 85k (8 steps instead of 7, still correct): each step re-sent about 1.3k–4.6k tokens instead of 11k–14k. Single-shot mode and the plan step still get the full context. One run per scenario so far; the benchmark will confirm it.
 - **Declining works (scenario 08):** the agent searched for the legacy service, found nothing and called `finish blocked` in 3 steps, without changing files.
+- **Benchmark (2026-10-26), against the Phase 0 baseline, 1 run per scenario on `gemini-flash-lite-latest`:**
+
+  | | single_shot (baseline) | tool_loop (`agent.v2`) |
+  | --- | --- | --- |
+  | Pass rate | 75% (6/8) | 100% (8/8) |
+  | Wrong fix shipped | 1 (#6) | 0 |
+  | No fix | 1 (#7) | 0 |
+  | Avg attempts | 2.25 | 1.4 |
+  | LLM calls | 33 | 106 |
+
+  Better results for about 3× the calls. Findings:
+  - **Every retry was a rule conflict, not a bad fix.** The plan step proposed editing the existing test file; the tools forbid that, so the agent added a new test file; the reviewer then rejected the diff for not matching the plan (#3 once, #4 twice, about 25 calls). Fix in prompts: a `plan.v2` that plans new test files, and/or a `review.v2` that accepts a new test file in place of a planned edit to an existing one.
+  - **#7 (large file)** passed this time but used 99k tokens for 11 calls: reading the 1,000-line file costs tokens on every later step until it is compacted. Worth watching, not yet a problem.
+  - **The report's "Only expected files" column** says "no" for every run because the agent always adds a regression test file, which `expectedFiles` doesn't list. It should ignore new test files.
+  - One run per scenario: the 8 × 3 run on a stronger model still waits for a paid key.
 - **Quota and budget:** that easy fix cost 10 model calls and ~27k tokens against ~4 calls in single-shot mode. A benchmark run of 8 scenarios is roughly 80–200 calls, beyond the Gemini free tier per day; the default `maxTokens` of 200k allows about 3–7 such attempts. Revisit the default after the benchmark.
 
 ---
@@ -391,3 +406,4 @@ One row per benchmark run, newest last.
 | 2026-10-26 | 3. Agent loop (partial) | tool_loop | gemini-flash-lite-latest | plan.v1, agent.v1, review.v1, analyze.v1 | none | 1 (scenario 01 only) | 1 | 0 | 0 | 0 | 1.0 | Pipeline check, not a benchmark: 7 loop steps + plan + review, 85k loop tokens, code `51238e9`. [report](../testing/coding-eval-2026-10-26.md) |
 | 2026-10-26 | 3. Agent loop (partial) | tool_loop | gemini-flash-lite-latest | plan.v1, agent.v1, review.v1, analyze.v1 | none | 1 (scenario 08 only) | 0 | 0 | 1 | 0 | 1.0 | The agent declined: 2 searches, then `finish blocked`; 3 steps, 10k tokens, no files changed (baseline needed retries to block). [report](../testing/coding-eval-2026-10-26-2.md) |
 | 2026-10-26 | 3. `agent.v2` (partial) | tool_loop | gemini-flash-lite-latest | plan.v1, agent.v2, review.v1, analyze.v1 | none | 1 (scenario 01 only) | 1 | 0 | 0 | 0 | 1.0 | File list instead of file contents in the agent prompt: 8 steps, 23k loop tokens vs 85k with `agent.v1` (-73%). [report](../testing/coding-eval-2026-10-26-3.md) |
+| 2026-10-26 | 3. Agent loop | tool_loop | gemini-flash-lite-latest | plan.v1, agent.v2, review.v1, analyze.v1 | none | 8 (1 per scenario) | 7 | 0 | 1 | 0 | 1.4 | Pass rate 100% (8/8), wrong-fix-shipped 0%, 106 LLM calls (baseline 33), 304k loop tokens, 51 min, code `8cdd74e`. Fixed #6 (baseline: wrong fix shipped) and #7 (baseline: no fix). All 4 retries came from the reviewer rejecting a new test file the plan had not listed (#3, #4). [report](../testing/coding-eval-2026-10-26-4.md) |
