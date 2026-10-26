@@ -12,6 +12,19 @@ const parsePositiveInt = (
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const AGENT_MODES = ["single_shot", "tool_loop"] as const;
+export type ExecutionAgentMode = (typeof AGENT_MODES)[number];
+
+/** A typo must not silently fall back to the other mode. */
+const parseAgentMode = (value: string | undefined): ExecutionAgentMode => {
+  if (!value) return "single_shot";
+  if ((AGENT_MODES as readonly string[]).includes(value))
+    return value as ExecutionAgentMode;
+  throw new Error(
+    `EXECUTION_AGENT_MODE must be one of ${AGENT_MODES.join(", ")} (got "${value}")`,
+  );
+};
+
 export const config = {
   nodeEnv: process.env.NODE_ENV ?? "development",
   port: parsePositiveInt(process.env.PORT, 3001),
@@ -77,6 +90,10 @@ export const config = {
     process.env.GENERATED_CODE_MAX_FILE_BYTES,
     500_000,
   ),
+  // single_shot: one implement call per attempt; tool_loop: the agent loop.
+  executionAgentMode: parseAgentMode(process.env.EXECUTION_AGENT_MODE),
+  // Model calls per attempt in tool_loop mode (an execution's budget.maxSteps wins).
+  agentMaxSteps: parsePositiveInt(process.env.AGENT_MAX_STEPS, 30),
   storeRawLlmOutput: process.env.STORE_RAW_LLM_OUTPUT === "true",
 };
 

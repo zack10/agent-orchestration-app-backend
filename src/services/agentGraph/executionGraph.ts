@@ -2,7 +2,7 @@ import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { Prisma } from "@prisma/client";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { config } from "../../config";
+import { ExecutionAgentMode, config } from "../../config";
 import prisma from "../../db";
 import { getBaseSha, getInstallationToken } from "../../integrations/githubApp";
 import { writeActionsToRoot } from "../../utils/codeWriter";
@@ -16,15 +16,25 @@ import { NonRetryableError } from "../../utils/safeError";
 import { parseAgentOutput } from "../../utils/llmUtils";
 import { hashSnapshot } from "../executionService";
 import { LLMService } from "../llm/LLMService";
+import { ToolRequest } from "../llm/types";
+import { SANDBOX_TOOLS } from "../sandbox/tools";
+import {
+  executionToolContext,
+  prismaToolCallRecorder,
+  runRecordedTool,
+} from "../sandbox/toolRunner";
 import {
   changedFiles,
   cloneGithubWorkspace,
   gitDiff,
   removeWorkspace,
   resetWorkspace,
+  startSandbox,
+  stopSandbox,
   verifyWorkspace,
   workspacePath,
 } from "../workspaceService";
+import { AgentStopReason, runAgentLoop } from "./agentLoop";
 import { reviewDiffSafety } from "./diffReview";
 import { fileActionsError } from "./outputFormat";
 import { RepoContext, collectRepoContext } from "./repoContext";
@@ -75,17 +85,70 @@ const ExecutionGraphState = Annotation.Root({
   }),
   verification: Annotation<VerificationResult | undefined>(),
   route: Annotation<GraphRoute>(),
+  agentMode: Annotation<ExecutionAgentMode>({
+    reducer: (_current, update) => update,
+    default: () => "single_shot",
+  }),
+  // Execution budget, set in load_context; enforced by the agent loop.
+  maxSteps: Annotation<number>({
+    reducer: (_current, update) => update,
+    default: () => config.agentMaxSteps,
+  }),
+  maxTokens: Annotation<number>({
+    reducer: (_current, update) => update,
+    default: () => 0,
+  }),
+  deadline: Annotation<number>({
+    reducer: (_current, update) => update,
+    default: () => 0,
+  }),
+  // Tokens spent by agent loops so far (single-shot calls report none).
+  tokensUsed: Annotation<number>({
+    reducer: (_current, update) => update,
+    default: () => 0,
+  }),
 });
+
+type GraphState = typeof ExecutionGraphState.State;
+
+const requireAgent = (state: GraphState) => {
+  if (!state.agentProvider || !state.agentModel)
+    throw new Error("Execution graph is missing the agent's provider or model");
+  return { provider: state.agentProvider, model: state.agentModel };
+};
 
 /** Sends a prompt to the run's agent (provider and model resolved in load_context). */
 const askAgent = (
-  state: typeof ExecutionGraphState.State,
+  state: GraphState,
   prompt: { system?: string; user: string },
 ) => {
-  if (!state.agentProvider || !state.agentModel)
-    throw new Error("Execution graph is missing the agent's provider or model");
-  return llm.generateContent(state.agentProvider, state.agentModel, prompt, state.agentApiKey);
+  const { provider, model } = requireAgent(state);
+  return llm.generateContent(provider, model, prompt, state.agentApiKey);
 };
+
+const askAgentWithTools = (state: GraphState, request: ToolRequest) => {
+  const { provider, model } = requireAgent(state);
+  return llm.generateWithTools(provider, model, request, state.agentApiKey);
+};
+
+/** The prompts a mode actually uses, recorded with every run. */
+const promptVersionsFor = (mode: ExecutionAgentMode) => {
+  const { implement, fileFormat, agent, ...shared } = EXECUTION_PROMPTS;
+  return mode === "tool_loop"
+    ? { ...shared, agent }
+    : { ...shared, implement, fileFormat };
+};
+
+interface ExecutionBudget {
+  maxSteps?: number;
+  maxTokens?: number;
+  maxDurationSeconds?: number;
+}
+
+const positive = (value: unknown, fallback: number) =>
+  typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
 
 const parseJsonRecord = (raw: string) => {
   const candidate = raw.trim().replace(/^```(?:json)?\s*/i, "");
@@ -182,11 +245,19 @@ const loadExecutionContext = async (
     where: { planTaskId: planTask.id },
     _max: { number: true },
   });
+  const agentMode = config.executionAgentMode;
+  const budget = (execution.budget ?? {}) as ExecutionBudget;
+  const maxSteps = positive(budget.maxSteps, config.agentMaxSteps);
+  const maxTokens = positive(budget.maxTokens, 200_000);
+  const deadline =
+    Date.now() + positive(budget.maxDurationSeconds, 1800) * 1000;
   await graphEvent(execution.id, "GRAPH_CONTEXT_LOADED", {
     repositoryId: execution.repositoryId,
     workItemId: execution.workItemId,
     planTaskId: planTask.id,
-    promptVersions: EXECUTION_PROMPTS,
+    agentMode,
+    budget: { maxSteps, maxTokens, maxDurationSeconds: (deadline - Date.now()) / 1000 },
+    promptVersions: promptVersionsFor(agentMode),
   });
 
   const resolved = llm.resolveModel(agent);
@@ -204,6 +275,10 @@ const loadExecutionContext = async (
     agentModel: resolved.model,
     agentApiKey,
     ticket: `${execution.workItem.title}\n${execution.workItem.description ?? ""}`,
+    agentMode,
+    maxSteps,
+    maxTokens,
+    deadline,
   };
 };
 
@@ -248,11 +323,10 @@ const planChange = async (state: typeof ExecutionGraphState.State) => {
   return { internalPlan };
 };
 
-const implementChange = async (state: typeof ExecutionGraphState.State) => {
+const startAttempt = async (state: GraphState) => {
   if (!state.planTaskId || !state.ticket) {
     throw new Error("Execution graph is missing task context");
   }
-
   const attemptNumber = state.attemptNumber + 1;
   const attempt = await prisma.taskAttempt.create({
     data: {
@@ -264,13 +338,19 @@ const implementChange = async (state: typeof ExecutionGraphState.State) => {
   await graphEvent(state.executionId, "GRAPH_ATTEMPT_STARTED", {
     attemptId: attempt.id,
     attemptNumber,
-    promptVersions: EXECUTION_PROMPTS,
+    agentMode: state.agentMode,
+    promptVersions: promptVersionsFor(state.agentMode),
   });
+  return { attempt, attemptNumber, ticket: state.ticket };
+};
+
+const implementChange = async (state: GraphState) => {
+  const { attempt, attemptNumber, ticket } = await startAttempt(state);
 
   const raw = await askAgent(
     state,
     renderExecutionPrompt("implement", {
-      ticket: state.ticket,
+      ticket,
       internalPlan: state.internalPlan || "No internal plan was produced.",
       repoContext:
         state.repoContext?.summary ?? "No repository context was collected.",
@@ -317,6 +397,122 @@ const implementChange = async (state: typeof ExecutionGraphState.State) => {
     attemptNumber,
     attemptId: attempt.id,
     route: "implemented" as GraphRoute,
+  };
+};
+
+const MAX_EVENT_TEXT_CHARS = 2000;
+const MAX_EVENT_PREVIEW_CHARS = 500;
+
+/** Why an attempt ended without a usable change, as feedback for the next one. */
+const LOOP_FAILURES: Record<Exclude<AgentStopReason, "done">, string> = {
+  blocked: "The agent declined the ticket",
+  max_steps: "The agent ran out of steps",
+  max_tokens: "The execution's token budget ran out",
+  timeout: "The execution's time budget ran out",
+  no_finish: "The agent stopped without finishing",
+};
+
+/**
+ * Tool-loop alternative to implement_change: the agent edits the workspace
+ * through sandbox tools until it calls finish or a budget runs out. The
+ * policy, verification and review nodes still run after it.
+ */
+const agentLoop = async (state: GraphState) => {
+  const { attempt, attemptNumber, ticket } = await startAttempt(state);
+  // Each attempt starts from the base commit, as in single-shot mode.
+  if (attemptNumber > 1) await resetWorkspace(state.executionId);
+
+  const execution = await prisma.execution.findUniqueOrThrow({
+    where: { id: state.executionId },
+    include: { repository: true },
+  });
+  const ctx = executionToolContext(state.executionId, execution.repository);
+  const recorder = prismaToolCallRecorder(attempt.id);
+  const prompt = renderExecutionPrompt("agent", {
+    ticket,
+    internalPlan: state.internalPlan || "No internal plan was produced.",
+    repoContext:
+      state.repoContext?.summary ?? "No repository context was collected.",
+    lastFailure: state.lastFailure || "None",
+    checkScripts: ctx.checkScripts.join(", ") || "none",
+  });
+
+  await startSandbox(state.executionId);
+  let outcome: Awaited<ReturnType<typeof runAgentLoop>>;
+  try {
+    outcome = await runAgentLoop(
+      {
+        system: prompt.system,
+        task: prompt.user,
+        tools: SANDBOX_TOOLS,
+        budget: {
+          maxSteps: state.maxSteps,
+          maxTokens: Math.max(0, state.maxTokens - state.tokensUsed),
+          deadline: state.deadline,
+        },
+      },
+      {
+        generate: (request) => askAgentWithTools(state, request),
+        runTool: (call) => runRecordedTool(ctx, call, recorder),
+        // One event per model call; full tool input and output are in ToolCall.
+        onStep: (step) =>
+          graphEvent(state.executionId, "GRAPH_AGENT_STEP", {
+            attemptId: attempt.id,
+            attemptNumber,
+            step: step.step,
+            promptVersion: prompt.version,
+            text: step.text.slice(0, MAX_EVENT_TEXT_CHARS),
+            usage: step.usage,
+            toolCalls: step.toolCalls.map(({ call, outcome: result }) => ({
+              name: call.name,
+              status: result.status,
+              input: JSON.stringify(call.arguments).slice(0, MAX_EVENT_PREVIEW_CHARS),
+              output: result.output.slice(0, MAX_EVENT_PREVIEW_CHARS),
+            })),
+          }),
+      },
+    );
+  } finally {
+    await stopSandbox(state.executionId);
+  }
+
+  const tokensUsed =
+    state.tokensUsed + outcome.usage.inputTokens + outcome.usage.outputTokens;
+  await graphEvent(state.executionId, "GRAPH_AGENT_FINISHED", {
+    attemptId: attempt.id,
+    attemptNumber,
+    stopReason: outcome.stopReason,
+    summary: outcome.summary.slice(0, MAX_EVENT_TEXT_CHARS),
+    steps: outcome.steps,
+    usage: outcome.usage,
+    tokensUsed,
+  });
+
+  let failure: string;
+  if (outcome.stopReason === "done") {
+    if ((await changedFiles(state.executionId)).length > 0)
+      return { attemptNumber, attemptId: attempt.id, tokensUsed, route: "implemented" as GraphRoute };
+    failure = `The agent called finish without changing any files: ${outcome.summary}`;
+  } else {
+    failure = `${LOOP_FAILURES[outcome.stopReason]}: ${outcome.summary}`;
+  }
+  await prisma.taskAttempt.update({
+    where: { id: attempt.id },
+    data: { status: "FAILED", error: failure, completedAt: new Date() },
+  });
+  // A refusal is the agent's decision, and an exhausted execution budget
+  // cannot recover; only a per-attempt failure is worth another attempt.
+  const final =
+    outcome.stopReason === "blocked" ||
+    outcome.stopReason === "max_tokens" ||
+    outcome.stopReason === "timeout" ||
+    attemptNumber >= MAX_ATTEMPTS;
+  return {
+    attemptNumber,
+    attemptId: attempt.id,
+    tokensUsed,
+    lastFailure: failure,
+    route: (final ? "blocked" : "retry") as GraphRoute,
   };
 };
 
@@ -554,14 +750,19 @@ const routeAfterVerification = (state: typeof ExecutionGraphState.State) => {
   return state.route;
 };
 
-const routeAfterFailure = (state: typeof ExecutionGraphState.State) =>
-  canRetry(state) ? "retry" : "blocked";
+/** The node that makes the change: one model call, or the agent loop. */
+const implementNode = (state: GraphState) =>
+  state.agentMode === "tool_loop" ? "agent_loop" : "implement_change";
+
+const routeAfterFailure = (state: GraphState) =>
+  canRetry(state) ? implementNode(state) : "blocked";
 
 const graph = new StateGraph(ExecutionGraphState)
   .addNode("load_context", loadExecutionContext)
   .addNode("inspect_repo", inspectRepository)
   .addNode("plan_change", planChange)
   .addNode("implement_change", implementChange)
+  .addNode("agent_loop", agentLoop)
   .addNode("enforce_policy", enforceRepositoryPolicy)
   .addNode("verify_change", verifyChange)
   .addNode("analyze_failure", analyzeFailure)
@@ -571,10 +772,18 @@ const graph = new StateGraph(ExecutionGraphState)
   .addEdge(START, "load_context")
   .addEdge("load_context", "inspect_repo")
   .addEdge("inspect_repo", "plan_change")
-  .addEdge("plan_change", "implement_change")
+  .addConditionalEdges("plan_change", implementNode, {
+    implement_change: "implement_change",
+    agent_loop: "agent_loop",
+  })
   .addConditionalEdges("implement_change", routeAfterVerification, {
     implemented: "enforce_policy",
     retry: "implement_change",
+    blocked: "block_execution",
+  })
+  .addConditionalEdges("agent_loop", routeAfterVerification, {
+    implemented: "enforce_policy",
+    retry: "agent_loop",
     blocked: "block_execution",
   })
   .addConditionalEdges("enforce_policy", routeAfterVerification, {
@@ -593,7 +802,8 @@ const graph = new StateGraph(ExecutionGraphState)
     artifact: "create_diff_artifact",
   })
   .addConditionalEdges("analyze_failure", routeAfterFailure, {
-    retry: "implement_change",
+    implement_change: "implement_change",
+    agent_loop: "agent_loop",
     blocked: "block_execution",
   })
   .addEdge("block_execution", END)

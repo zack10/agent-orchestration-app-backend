@@ -204,10 +204,14 @@ flowchart TD
     start([start]) --> load["load_context<br/>agent, plan task, base SHA, clone workspace"]
     load --> inspect["inspect_repo<br/>file tree, scripts, relevant files"]
     inspect --> plan["plan_change<br/>LLM: internal plan"]
-    plan --> impl["implement_change<br/>LLM: FILE blocks"]
+    plan -->|single_shot| impl["implement_change<br/>LLM: FILE blocks"]
+    plan -->|tool_loop| loop["agent_loop<br/>LLM + sandbox tools until finish"]
     impl -->|output parsed| policy["enforce_policy<br/>file count, protected paths"]
     impl -->|malformed output| impl
     impl -->|3rd malformed output| blocked
+    loop -->|finished with changes| policy
+    loop -->|out of steps, no changes| loop
+    loop -->|declined, token/time budget, 3rd failure| blocked
     policy -->|violation| analyze
     policy -->|allowed| verify["verify_change<br/>npm scripts in Docker, network off"]
     verify -->|pass| review["review_diff<br/>secret patterns + LLM review"]
@@ -215,12 +219,20 @@ flowchart TD
     review -->|issues found| analyze
     review -->|clean| artifact["create_diff_artifact<br/>DIFF + PUBLISH approval"]
     analyze -->|attempts left| impl
+    analyze -->|attempts left, tool_loop| loop
     analyze -->|none left| blocked(["block_execution<br/>BLOCKED"])
     verify -->|3rd failure| blocked
     review -->|3rd failure| blocked
     policy -->|3rd violation| blocked
     artifact --> done(["AWAITING_PUBLISH_APPROVAL"])
 ```
+
+`EXECUTION_AGENT_MODE` picks how the change is made:
+
+- `single_shot` (default): `implement_change` asks the model once per attempt for whole files.
+- `tool_loop`: `agent_loop` gives the model the sandbox tools (`src/services/sandbox/tools.ts`: list, read, search, edit, run a check, finish). It works step by step against a long-lived container with no network, until it calls `finish` or a budget runs out: `AGENT_MAX_STEPS` model calls per attempt (or the execution's `budget.maxSteps`), the execution's `budget.maxTokens` across all attempts, and its `budget.maxDurationSeconds`. The agent can also decline the ticket (`finish` with status `blocked`), which blocks the execution without retrying. Older tool output is shortened as the conversation grows. Each model call is a `GRAPH_AGENT_STEP` event and each tool call a `ToolCall` row, so a run can be replayed.
+
+In both modes, policy, verification and review run afterwards, independently of what the agent reports.
 
 The LLM steps' prompts are versioned files in `src/prompts/execution/` (e.g. `implement.v1.md`). Each has a system part (fixed instructions) and a user part (ticket details). The active versions are listed in `src/prompts/index.ts`, and each run records them in its execution events (`promptVersions`, `promptVersion`). To change wording, add a new version instead of editing a released one.
 
@@ -383,7 +395,7 @@ Behaviour worth knowing:
 | API access | `API_AUTH_TOKEN`, `API_AUTH_ACTOR`, `AUTH_DISABLED`, `CORS_ORIGINS`, `API_RATE_LIMIT_PER_MINUTE` |
 | LLM | `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `LLM_PROVIDERS`, `LLM_DEFAULT_PROVIDER`, `LLM_DEFAULT_MODEL`, `LLM_REQUEST_TIMEOUT_MS`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_RATE_LIMIT_RETRIES` |
 | Task pipeline | `TASK_MAX_ATTEMPTS`, `TASK_RETRY_DELAY_MS`, `TASK_LEASE_MS`, `GENERATED_CODE_MAX_FILES`, `GENERATED_CODE_MAX_FILE_BYTES`, `STORE_RAW_LLM_OUTPUT` |
-| Execution pipeline | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `INTEGRATION_POLL_INTERVAL_MS`, `EXECUTION_LEASE_MS`, `WORKSPACE_ROOT`, `KEEP_WORKSPACES`, `ARTIFACT_ROOT` |
+| Execution pipeline | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `INTEGRATION_POLL_INTERVAL_MS`, `EXECUTION_LEASE_MS`, `EXECUTION_AGENT_MODE`, `AGENT_MAX_STEPS`, `WORKSPACE_ROOT`, `KEEP_WORKSPACES`, `ARTIFACT_ROOT` |
 | Messaging | `CONSUMER_MAX_ATTEMPTS`, `CONSUMER_RETRY_DELAY_MS` |
 | HTTP connector | `MCP_HTTP_ALLOWED_HOSTS`, `MCP_HTTP_ALLOW_PRIVATE_IPS`, `MCP_HTTP_TIMEOUT_MS`, `MCP_HTTP_MAX_RESPONSE_BYTES` |
 
@@ -497,7 +509,7 @@ src/
     ingestionService.ts     tracker-neutral ticket ingestion
     integrationPollingService.ts
     workspaceService.ts     Docker clone/verify/diff/publish, long-lived run sandbox
-    agentGraph/             LangGraph run graph, repo context, repo policy, diff review
+    agentGraph/             LangGraph run graph, agent loop, repo context, repo policy, diff review
     llm/                    provider registry, providers, tool calling, retries, output errors
     sandbox/                agent tools (list/read/search/edit/run_check/finish) with policy + ToolCall recording
     taskQueueService.ts, agentRunner.ts, promptBuilder.ts   task pipeline

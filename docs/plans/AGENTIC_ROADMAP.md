@@ -13,7 +13,7 @@ The existing plumbing stays: Docker sandbox, LangGraph run graph, snapshot-bound
 | 0. Coding evaluation + prompt management | We can't tell whether the agent writes correct code, or whether a change made it better or worse. | A benchmark of 8 realistic bugs scored by hidden tests the agent never sees; prompts move to versioned files so every result is tied to the exact prompts used. | M | Done (baseline 2026-10-25: 6/8 pass, 1 wrong fix shipped) |
 | 1. Provider registry + tool calling in the LLM layer | Each new LLM needs its own code and edits in several places, and the LLM layer can only send text and get text back, so the model can't ask to do anything. | One generic OpenAI-compatible provider configured per vendor (new vendors need configuration only), a single provider registry, then function calling behind one shared format. | M–L | Done; live check pending for Anthropic only (no key yet) |
 | 2. Sandbox tools | The agent only sees files chosen by name, cut at 20 KB, and must rewrite whole files; it can also edit tests. | Give it safe tools inside the Docker sandbox (list, read, search, edit, run checks) with the safety rules enforced in each tool, and log every call. | M | Done (tools built and tested; used from Phase 3) |
-| 3. Agent loop | The agent gets one shot per attempt and can't explore, check its work or change course. | A loop where the model picks a tool, sees the result and decides the next step, until it finishes or hits a step/token/time budget; the existing checks still run after it. | L | Not started |
+| 3. Agent loop | The agent gets one shot per attempt and can't explore, check its work or change course. | A loop where the model picks a tool, sees the result and decides the next step, until it finishes or hits a step/token/time budget; the existing checks still run after it. | L | Built; benchmark pending |
 | 4. Parallel executions (several tickets at once) | Tickets run one after another, so one slow ticket holds up the rest. | Allow several runs at once with limits on runs, CPU/memory and LLM rate, keep each run isolated, and let workers scale as separate processes. | M–L | Not started |
 | 5. Agent roles and a real planner | Every step uses the project's first agent, and plan approval reviews a fixed template. | Give agents roles (planner, implementer, reviewer) picked per step, and add a planner that reads the repo and proposes a real plan to approve. | M | Not started |
 | 6. Agent skills | Stored skills never reach the agent, so reusable know-how goes unused. | The agent sees a short list of its role's skills and loads the full instructions only when needed; skills guide but never grant permissions. | M | Not started |
@@ -37,7 +37,7 @@ Found while reviewing the code after the first passing end-to-end run (draft PR 
 | Repo context is chosen by **file name** only | `repoContext.ts` scores paths by ticket words, max 12 files | Phases 2, 6 |
 | Files are cut at **20 KB** but the agent returns **whole files** | `MAX_FILE_BYTES` in `repoContext.ts` + whole-file `FILE` blocks; large files can be silently truncated | Phase 2 |
 | The agent can **edit or delete existing tests** to pass verification | Default `protectedPaths` covers only `package.json`, `package-lock.json`, `.github` | Phases 0 (hidden tests), 2 (tool policy) |
-| `Execution.budget.maxTokens` is stored but never enforced | `createExecution` in `executionService.ts` | Phase 3 |
+| ~~`Execution.budget.maxTokens` is stored but never enforced~~ Enforced for agent-loop calls (single-shot calls don't report usage) | `createExecution` in `executionService.ts` | Phase 3 |
 | Tickets run one after another in a single process | Each consumer takes one message at a time (`channel.prefetch(1)`, `rabbitMQService.ts`); no concurrency setting | Phase 4 |
 | Parallel runs would share LLM rate limits with nothing coordinating them | Retries exist per call (`retry.ts`), but no shared limiter | Phase 4 |
 | API and workers always run in the same process | `src/index.ts` starts both | Phase 4 |
@@ -219,15 +219,27 @@ The tools are not used by the run graph yet; Phase 3 wires them into the agent l
 
 ### Tasks
 
-- [ ] New `agent_loop` graph node that replaces `implement_change`: model → tool calls → results → repeat until `finish` or a budget runs out
-- [ ] Budgets: max steps, max tokens (enforce `Execution.budget.maxTokens`), wall-clock time; hitting one ends the attempt with a clear reason
-- [ ] Context management: trim or summarise old tool output so long runs fit the context window
-- [ ] Keep `verify_change → review_diff → analyze_failure` after the loop as an independent outer guard
-- [ ] Feature flag `EXECUTION_AGENT_MODE=single_shot|tool_loop` so both modes run through the benchmark
-- [ ] Execution events for each step, so a run can be replayed from `GET /api/executions/:id`
-- [ ] Update the README run-graph diagram
+- [x] New `agent_loop` graph node that replaces `implement_change`: model → tool calls → results → repeat until `finish` or a budget runs out
+- [x] Budgets: max steps, max tokens (enforce `Execution.budget.maxTokens`), wall-clock time; hitting one ends the attempt with a clear reason
+- [x] Context management: trim or summarise old tool output so long runs fit the context window
+- [x] Keep `verify_change → review_diff → analyze_failure` after the loop as an independent outer guard
+- [x] Feature flag `EXECUTION_AGENT_MODE=single_shot|tool_loop` so both modes run through the benchmark
+- [x] Execution events for each step, so a run can be replayed from `GET /api/executions/:id`
+- [x] Update the README run-graph diagram
+- [ ] Run the e2e execution suite in `tool_loop` mode
+- [ ] Benchmark `tool_loop` and record it next to the baseline (needs more quota than the free tier: see below)
 
 **Done when:** `tool_loop` completes the e2e execution suite, and its benchmark results are recorded next to the baseline.
+
+#### Decisions (2026-10-26)
+
+- **The loop is pure.** `runAgentLoop` (`agentGraph/agentLoop.ts`) takes the model, the tool runner and an event callback as arguments and does no I/O, so it is unit-tested with a scripted model (`tests/agentLoop.test.js`). The `agent_loop` graph node wires in the provider, the recorded sandbox tools and `GRAPH_AGENT_STEP` events.
+- **Both modes stay in the graph.** `plan_change` and `analyze_failure` route to `implement_change` or `agent_loop` by mode. Each run records `agentMode` and only the prompts that mode uses, so benchmark rows can't mix them up.
+- **Budgets are checked before each model call**, so a started call always records its tool results. Steps are per attempt (`AGENT_MAX_STEPS`, default 30, or `budget.maxSteps`); tokens and time are per execution (`budget.maxTokens`, `budget.maxDurationSeconds`), counted across attempts.
+- **Stopping:** `finish done` with changes goes on to policy, verification and review. `finish done` with no changes, running out of steps, or replying twice without a tool call fails the attempt and retries. `finish blocked` (the agent declines) and an exhausted token or time budget block the execution without retrying. This answers the Phase 0 finding that the implement step could not decline a ticket.
+- **Context management:** tool results older than the 8 most recent are replaced with their first line and a note; no message is removed, because every provider needs each tool call paired with its result, and assistant turns keep their raw content for replay.
+- **Live check (2026-10-26),** without the DB or GitHub: `gemini-flash-lite-latest`, real tools and sandbox, scenario 01. It listed, read the code and test, ran the tests, edited, was denied editing the existing test, created a new test file, re-ran the tests and finished: 10 steps, about 27k tokens, 91 s. The hidden tests passed (graded in a network-less container).
+- **Quota and budget:** that easy fix cost 10 model calls and ~27k tokens against ~4 calls in single-shot mode. A benchmark run of 8 scenarios is roughly 80–200 calls, beyond the Gemini free tier per day; the default `maxTokens` of 200k allows about 3–7 such attempts. Revisit the default after the benchmark.
 
 ---
 

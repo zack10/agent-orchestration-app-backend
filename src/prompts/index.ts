@@ -9,6 +9,7 @@ import path from "node:path";
 export const EXECUTION_PROMPTS = {
   plan: "plan.v1",
   implement: "implement.v1",
+  agent: "agent.v1",
   analyze: "analyze.v1",
   review: "review.v1",
   fileFormat: "file-format.v1",

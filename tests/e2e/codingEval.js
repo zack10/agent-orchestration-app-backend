@@ -164,16 +164,27 @@ const gradeDiff = async (scenario, diff) => {
   }
 };
 
-/** Attempts, LLM calls and prompt versions, read from the execution's events. */
+/** Mode, attempts, LLM calls and prompt versions, read from the execution's events. */
 const eventMetrics = (events) => {
   const ofType = (type) => events.filter((event) => event.type === type);
+  const context = ofType("GRAPH_CONTEXT_LOADED")[0]?.payload;
+  // A single-shot attempt is one implement call; a tool-loop attempt records
+  // each model call as a GRAPH_AGENT_STEP (with a promptVersion).
   const llmCalls = events.filter(
-    (event) => event.type === "GRAPH_ATTEMPT_STARTED" || event.payload?.promptVersion,
+    (event) =>
+      (event.type === "GRAPH_ATTEMPT_STARTED" && event.payload?.agentMode !== "tool_loop") ||
+      event.payload?.promptVersion,
   ).length;
+  const loopTokens = ofType("GRAPH_AGENT_FINISHED").reduce(
+    (sum, event) => sum + (event.payload?.usage?.inputTokens ?? 0) + (event.payload?.usage?.outputTokens ?? 0),
+    0,
+  );
   return {
+    agentMode: context?.agentMode ?? "single_shot",
     attempts: ofType("GRAPH_ATTEMPT_STARTED").length,
     llmCalls,
-    promptVersions: ofType("GRAPH_CONTEXT_LOADED")[0]?.payload?.promptVersions ?? null,
+    loopTokens,
+    promptVersions: context?.promptVersions ?? null,
   };
 };
 
@@ -290,7 +301,7 @@ const writeReport = (results, meta) => {
     "",
     "| | |",
     "| --- | --- |",
-    `| Mode | single_shot |`,
+    `| Mode | ${[...new Set(results.map((result) => result.agentMode).filter(Boolean))].join(", ") || "unknown"} |`,
     `| Model | ${env("E2E_LLM_PROVIDER")} / ${env("E2E_LLM_MODEL")} |`,
     `| Prompt versions | ${promptList} |`,
     `| Code version | ${meta.commit} |`,
@@ -311,7 +322,7 @@ const writeReport = (results, meta) => {
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ...results.map(
       (result) =>
-        `| ${result.scenario} | ${result.run} | ${OUTCOMES[result.outcome]} | ${result.attempts ?? ""} | ${result.llmCalls ?? ""} | ${Math.round(result.durationMs / 1000)}s | ${cell((result.files ?? []).join(", "))} | ${result.files ? `+${result.linesAdded}/-${result.linesRemoved}` : ""} | ${result.files ? (result.onlyExpectedFiles ? "yes" : "no") : ""} | ${result.files ? (result.testsAdded ? "yes" : "no") : ""} | ${result.files ? (result.testsModified ? "**yes**" : "no") : ""} | ${cell(result.note)} |`,
+        `| ${result.scenario} | ${result.run} | ${OUTCOMES[result.outcome]} | ${result.attempts ?? ""} | ${result.llmCalls ?? ""}${result.loopTokens ? ` (${Math.round(result.loopTokens / 1000)}k tokens)` : ""} | ${Math.round(result.durationMs / 1000)}s | ${cell((result.files ?? []).join(", "))} | ${result.files ? `+${result.linesAdded}/-${result.linesRemoved}` : ""} | ${result.files ? (result.onlyExpectedFiles ? "yes" : "no") : ""} | ${result.files ? (result.testsAdded ? "yes" : "no") : ""} | ${result.files ? (result.testsModified ? "**yes**" : "no") : ""} | ${cell(result.note)} |`,
     ),
     "",
     "Tokens are not recorded yet (the pipeline does not track usage until Phase 3).",
