@@ -112,9 +112,8 @@ const lines = (text) =>
     .sort();
 
 for (const name of Object.keys(legacy)) {
-  test(`${EXECUTION_PROMPTS[name]} keeps the wording of the old inline prompt`, () => {
-    const prompt = renderExecutionPrompt(name, variables[name]);
-    assert.equal(prompt.version, EXECUTION_PROMPTS[name]);
+  test(`${name}.v1 keeps the wording of the old inline prompt`, () => {
+    const prompt = renderPromptVersion(`${name}.v1`, variables[name]);
     assert.ok(prompt.system.length > 0);
     assert.ok(prompt.user.length > 0);
 
@@ -145,14 +144,14 @@ test("a missing variable fails loudly and names the variable", () => {
   const { diff, ...missingDiff } = variables.review;
   assert.ok(diff);
   assert.throws(
-    () => renderExecutionPrompt("review", missingDiff),
+    () => renderPromptVersion("review.v1", missingDiff),
     /review\.v1 is missing variable "diff"/,
   );
 });
 
 test("an unused variable fails loudly (catches typos in variable names)", () => {
   assert.throws(
-    () => renderExecutionPrompt("plan", { ...variables.plan, tickets: "x" }),
+    () => renderPromptVersion("plan.v1", { ...variables.plan, tickets: "x" }),
     /plan\.v1 does not use variable\(s\): tickets/,
   );
 });
@@ -168,4 +167,18 @@ test("values are inserted as-is, never expanded again", () => {
 test("unknown or unsafe prompt versions are refused", () => {
   assert.throws(() => renderPromptVersion("../package"), /Invalid prompt version/);
   assert.throws(() => renderPromptVersion("plan.v99"), /ENOENT/);
+});
+
+test("plan.v2 and review.v2 extend v1 with the new-test-file rule and change nothing else", () => {
+  for (const name of ["plan", "review"]) {
+    const v1 = renderPromptVersion(`${name}.v1`, variables[name]);
+    const v2 = renderExecutionPrompt(name, variables[name]);
+    assert.equal(v2.version, `${name}.v2`);
+    assert.equal(v2.user, v1.user);
+    const added = lines(v2.system).filter((line) => !lines(v1.system).includes(line));
+    assert.equal(added.length, 1, `${name}.v2 adds one paragraph`);
+    assert.deepEqual(lines(v1.system).filter((line) => !lines(v2.system).includes(line)), [], "nothing removed");
+  }
+  assert.match(renderExecutionPrompt("plan", variables.plan).system, /Existing test files must not be changed.*new test file/);
+  assert.match(renderExecutionPrompt("review", variables.review).system, /guidance, not a contract.*A new test file for the fix is expected/);
 });

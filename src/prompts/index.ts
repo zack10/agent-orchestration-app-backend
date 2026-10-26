@@ -7,11 +7,11 @@ import path from "node:path";
  * tied to the exact prompts that produced it. Never edit a released version.
  */
 export const EXECUTION_PROMPTS = {
-  plan: "plan.v1",
+  plan: "plan.v2",
   implement: "implement.v1",
   agent: "agent.v2",
   analyze: "analyze.v1",
-  review: "review.v1",
+  review: "review.v2",
   fileFormat: "file-format.v1",
 } as const;
 
