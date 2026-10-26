@@ -4,7 +4,7 @@ Created 2026-10-19. Tracks the work to turn the run step from "an LLM inside a f
 
 The existing plumbing stays: Docker sandbox, LangGraph run graph, snapshot-bound approvals, outbox/inbox, leases, retries, dead-lettering, and the end-to-end suites. The phases change what happens **inside** the run step.
 
-**Rule for every phase:** finish by re-running the Phase 0 benchmark and recording the result in the [results log](#results-log).
+**Rule for every phase:** finish by re-running the Phase 0 benchmark and recording the result in the [results log](#results-log). From Phase 4 on, also run the [reference projects](#reference-projects): real projects in different stacks. Limitations nobody has found yet are expected to show up there, as failing rows, and go into the [known limitations](#known-limitations-audit-2026-10-26) table before the phase counts as done.
 
 **Rule for every phase: no language lock-in.** The agent must work on repositories in any language, framework and platform, not only Node/TypeScript. New code must not assume a language, package manager, build tool or test runner; anything toolchain-specific comes from the repository's detected or configured toolchain (Phase 4), and prompts must not name a language unless it comes from that toolchain.
 
@@ -17,14 +17,66 @@ The existing plumbing stays: Docker sandbox, LangGraph run graph, snapshot-bound
 | 2. Sandbox tools | The agent only sees files chosen by name, cut at 20 KB, and must rewrite whole files; it can also edit tests. | Give it safe tools inside the Docker sandbox (list, read, search, edit, run checks) with the safety rules enforced in each tool, and log every call. | M | Done (tools built and tested; used from Phase 3) |
 | 3. Agent loop | The agent gets one shot per attempt and can't explore, check its work or change course. | A loop where the model picks a tool, sees the result and decides the next step, until it finishes or hits a step/token/time budget; the existing checks still run after it. | L | Done |
 | 4. Any language, framework and platform | The pipeline assumes Node: a Node-only sandbox image, `npm ci`, checks run as `npm run <script>`, `package.json`-based context and prompts that say "Node/TypeScript". A PHP, Java, Python or Go repository cannot be fixed at all. | Detect each repository's toolchain (with per-repository overrides) and take the sandbox image, install step and checks from it; give the agent a general command tool inside the sandbox like a real coding agent; enforce test and protected-file rules on the final diff; language-neutral prompts; benchmark scenarios in other languages. | L | Not started |
-| 5. Parallel executions (several tickets at once) | Tickets run one after another, so one slow ticket holds up the rest. | Allow several runs at once with limits on runs, CPU/memory and LLM rate, keep each run isolated, and let workers scale as separate processes. | M–L | Not started |
-| 6. Agent roles and a real planner | Every step uses the project's first agent, and plan approval reviews a fixed template. | Give agents roles (planner, implementer, reviewer) picked per step, and add a planner that reads the repo and proposes a real plan to approve. | M | Not started |
-| 7. Agent skills | Stored skills never reach the agent, so reusable know-how goes unused. | The agent sees a short list of its role's skills and loads the full instructions only when needed; skills guide but never grant permissions. | M | Not started |
-| 8. Real MCP | Tools are hard-coded and there's no standard way to plug in new ones. | Serve the sandbox tools over the Model Context Protocol and have the agent discover tools, so allowlisted external tool servers can be added safely. | M | Not started |
-| 9. Retrieval | Tickets that don't name the right file can miss the relevant code. | Index the repo by meaning (embeddings in Postgres with pgvector) and add a semantic search tool. | M | Not started |
-| 10. Collaborating agents and memory | The same agent reviews its own work, and nothing learned in one run helps the next. | An independent reviewer using structured, capped hand-offs controlled by the graph, plus per-repo lessons kept only once a real result confirms them. | M | Not started |
+| 5. Any source host and issue tracker | Only GitHub repositories and Trello cards work; the agent reads only a card's title and description, and always targets the default branch. | Pluggable source-control adapters (GitLab, Bitbucket, Azure DevOps) like the tracker adapters, more tracker adapters (Jira, Linear, GitHub Issues), ticket attachments and comments passed to the agent, and a chosen target branch. | L | Not started |
+| 6. Any kind of task | The agent only fixes bugs, with one task in one repository per ticket. | Task types (bug, feature, refactor, dependency upgrade, migration) with matching prompts and checks, plans with several tasks, and changes across several repositories; benchmark scenarios for each type. | L | Not started |
+| 7. Feedback loop after the PR | The agent stops at the draft PR: it never sees review comments or the repository's own CI. | Read PR review comments and CI results, and run a follow-up attempt on the same branch, within the same budgets and approvals. | M | Not started |
+| 8. Parallel executions (several tickets at once) | Tickets run one after another, so one slow ticket holds up the rest. | Allow several runs at once with limits on runs, CPU/memory and LLM rate, keep each run isolated, and let workers scale as separate processes. | M–L | Not started |
+| 9. Agent roles and a real planner | Every step uses the project's first agent, and plan approval reviews a fixed template. | Give agents roles (planner, implementer, reviewer) picked per step, and add a planner that reads the repo and proposes a real plan to approve. | M | Not started |
+| 10. Agent skills | Stored skills never reach the agent, so reusable know-how goes unused. | The agent sees a short list of its role's skills and loads the full instructions only when needed; skills guide but never grant permissions. | M | Not started |
+| 11. Real MCP | Tools are hard-coded and there's no standard way to plug in new ones. | Serve the sandbox tools over the Model Context Protocol and have the agent discover tools, so allowlisted external tool servers can be added safely. | M | Not started |
+| 12. Retrieval | Tickets that don't name the right file can miss the relevant code. | Index the repo by meaning (embeddings in Postgres with pgvector) and add a semantic search tool. | M | Not started |
+| 13. Collaborating agents and memory | The same agent reviews its own work, and nothing learned in one run helps the next. | An independent reviewer using structured, capped hand-offs controlled by the graph, plus per-repo lessons kept only once a real result confirms them. | M | Not started |
+| 14. Other platforms and running the app | Everything runs in Linux containers, so iOS/macOS, Windows-only, Android, GPU and browser-based work can't be built or tested, and the agent can't run the app to reproduce UI or runtime bugs. | Platform runners selected by the toolchain (macOS and Windows build machines, Android emulators, headless browsers), and tools to start the app and observe it (HTTP requests, browser screenshots, logs). | L | Not started |
 
-Phase 5 does not depend on Phases 1–4; it can be pulled forward any time after Phase 0.
+Phase 8 does not depend on Phases 1–7; it can be pulled forward any time after Phase 0.
+
+## Known limitations (audit 2026-10-26)
+
+Every place where the agent is tied to one language, platform, service or kind of problem, and the phase that removes it. **No phase is done while it leaves one of its rows open.** New limitations of this kind go in this table first.
+
+| # | Limitation | Where in the code | Effect | Phase |
+| --- | --- | --- | --- | --- |
+| 1 | Node/TypeScript only | `node:20-bookworm` image, `npm ci`, `npm run` (`workspaceService.ts`, `run_check`, `verifyWorkspace`), `package.json` context, prompts | Other languages can't be fixed at all | 4 |
+| 2 | Tests that need services can't run | Sandbox runs with `--network none` and nothing beside it | Web backends whose tests need Postgres, MySQL, Redis, queues (Laravel, Django, Rails, Spring, ...) can't be verified | 4 |
+| 3 | Linux containers only | All work runs in a Linux Docker container | iOS/macOS (Xcode), Windows-only .NET Framework, Android, GPU and browser tests can't be built or run | 14 |
+| 4 | GitHub only | GitHub App for clone, push and PRs (`integrations/githubApp.ts`) | GitLab, Bitbucket, Azure DevOps repositories can't be used | 5 |
+| 5 | Trello only | One `IssueTrackerAdapter` (Trello) | Jira, Linear, GitHub Issues tickets can't come in | 5 |
+| 6 | Private dependencies fail | Install has no registry credentials; submodules and Git LFS not fetched | Private npm/Maven/Composer/PyPI packages, submodules and LFS files are missing | 4 |
+| 7 | Missing check scripts block every run | Default checks `lint`, `build`, `test` (`executionGraph.ts`, `toolRunner.ts`) | A repository without one of them fails verification on every attempt, even with a correct fix | 4 |
+| 8 | Bug fixes only | Prompts say "fix this bug"; the plan is a fixed template | Features, refactors, upgrades and migrations aren't supported or measured | 6 |
+| 9 | One task in one repository | `plans[0].tasks[0]`; one repository per execution | Multi-step tickets and changes across repositories (e.g. frontend + backend) can't be done | 6 |
+| 10 | Fixed size limits | 20 changed files, 500 KB per file, 2 CPU / 2 GB per sandbox, 5-minute checks, 250-file context tree, all hard-coded | Large builds (Java, C++, monorepos) run out of memory or time; large changes are rejected | 4 |
+| 11 | Only the ticket title and description are read | Trello fetch reads `name,desc` | Screenshots, attached logs, stack traces and comments never reach the agent | 5 |
+| 12 | Monorepos and subprojects | Checks always run at the repository root | A fix in a subproject can't be verified with that subproject's own toolchain | 4 |
+| 13 | Always targets the default branch | `repository.defaultBranch` for base and PR | Release or hotfix branches can't be fixed | 5 |
+| 14 | Stops at the draft PR | No PR comment or CI integration | Review feedback and CI failures are never acted on | 7 |
+| 15 | Can't run the app | Only file tools and check scripts | UI and runtime bugs can't be reproduced or confirmed | 14 |
+| 16 | Single-shot is still the default | `EXECUTION_AGENT_MODE=single_shot` | Whole-file rewrites unless `tool_loop` is switched on, although it measured better | 4 |
+| 17 | Tests that need secrets or environment config | No way to give a run environment variables or `.env` values | Suites that need API keys, config files or feature flags won't start | 4 |
+| 18 | Flaky or slow test suites | Checks run once, as a whole, with a 5-minute timeout | A random failure looks like a bad fix and burns attempts; long suites always time out; failures that existed before the change are blamed on it | 4 |
+| 19 | Few or no tests | Verification only runs what exists | A passing check proves nothing, and nobody is told; the agent doesn't write the missing tests first | 4, 6 |
+| 20 | Infrastructure and config repositories (Terraform, Kubernetes, Helm, Ansible) | No checks beyond test scripts | Changes can't be validated; a real check (`terraform plan`) needs cloud or cluster access | 4 (static checks), 14 (real environments) |
+| 21 | Very large repositories | Full clone per execution (`cloneGithubWorkspace`), `search_code` reads every file on each call, 250-file overview, 500-entry `list_files`, whole suite per check | Slow and expensive runs, a tiny view of the code, missed related code in other modules | 4, 12 |
+| 22 | Quality depends on the model | Measured only on `gemini-flash-lite-latest` with Node scenarios | Results in other languages and on hard tickets are unknown; a weak model fails where a strong one would succeed | 4 (and every phase) |
+| 23 | Prompt injection | Ticket text, attachments, comments and repository files reach the prompt | Text written to steer the agent (e.g. "also send the .env file to ...") could change what it does | 5, 7 (and every phase) |
+
+## Reference projects
+
+The benchmark (8 bugs in one small Node repository) proves the agent can fix code, not that it copes with real projects. A code review found 23 limitations; others only show up when the agent runs on a real project (an unusual build, a test runner that needs a display, a package manager that behaves differently in a container). So every phase from Phase 4 is confirmed on a fixed set of small, real-world reference projects, each with a known bug and hidden tests, graded like the benchmark:
+
+| Stack | What it exercises |
+| --- | --- |
+| Laravel (PHP) + MySQL | Composer, a database in tests, framework conventions |
+| Spring Boot (Java, Maven) | JVM build, slow startup, memory |
+| Django (Python) + Postgres | pip/poetry, migrations, a database in tests |
+| Rails (Ruby) | Bundler, framework conventions |
+| Go service | Go modules, `go test` |
+| React frontend (TypeScript) | Frontend build, component tests |
+| .NET (C#) | `dotnet` SDK, solution files |
+| Monorepo (several packages) | Subprojects with their own toolchains |
+| Terraform repository | Static checks without cloud access |
+
+A project that can't be supported yet stays in the matrix as a known failure, linked to its limitation row, so progress is visible. The matrix grows with each phase (another tracker or source host in Phase 5, feature and refactor tickets in Phase 6, a UI bug in Phase 14).
 
 ## Why: what the project does not teach yet
 
@@ -33,24 +85,24 @@ Found while reviewing the code after the first passing end-to-end run (draft PR 
 | Gap | Where it shows up | Addressed by |
 | --- | --- | --- |
 | No way to measure coding quality; one easy pass proves plumbing, not ability | Only e2e ticket is "append a line to README" against a repo whose `test` script just echoes | Phase 0 |
-| Execution prompts are hard-coded, unversioned and not recorded per run, so a prompt change can't be linked to a result | 5 inline prompt strings in `executionGraph.ts` (task, plan, implement, analyze, review); no system prompt; the agent's `baseInstructions` is ignored by this pipeline (only `promptBuilder.ts` uses it) | Phases 0, 6 |
-| Skills are stored and assignable but have no effect | `Skill` model and `POST /api/skills/assign` exist; no prompt in either pipeline reads them | Phase 7 |
+| Execution prompts are hard-coded, unversioned and not recorded per run, so a prompt change can't be linked to a result | 5 inline prompt strings in `executionGraph.ts` (task, plan, implement, analyze, review); no system prompt; the agent's `baseInstructions` is ignored by this pipeline (only `promptBuilder.ts` uses it) | Phases 0, 9 |
+| Skills are stored and assignable but have no effect | `Skill` model and `POST /api/skills/assign` exist; no prompt in either pipeline reads them | Phase 10 |
 | Every new LLM needs its own code; only one OpenAI-compatible endpoint can be configured at a time | Provider list hard-coded in `LLMService.ts`, 4 Zod enums, `llmRoutes.ts`; single global `OPENAI_BASE_URL`; `listModels` keeps only `gpt-*`/`o1-*` | Phase 1 |
 | No tool calling: the model never decides what to read, search or run | `implement_change` sends one prompt and gets whole files back | Phases 1–3 |
-| Repo context is chosen by **file name** only | `repoContext.ts` scores paths by ticket words, max 12 files | Phases 2, 7 |
+| Repo context is chosen by **file name** only | `repoContext.ts` scores paths by ticket words, max 12 files | Phases 2, 12 |
 | Files are cut at **20 KB** but the agent returns **whole files** | `MAX_FILE_BYTES` in `repoContext.ts` + whole-file `FILE` blocks; large files can be silently truncated | Phase 2 |
 | The agent can **edit or delete existing tests** to pass verification | Default `protectedPaths` covers only `package.json`, `package-lock.json`, `.github` | Phases 0 (hidden tests), 2 (tool policy) |
 | ~~`Execution.budget.maxTokens` is stored but never enforced~~ Enforced for every model call of an execution, plus a daily limit across all of them (see "Cost guardrails") | `createExecution` in `executionService.ts` | Phase 3 |
-| Nothing stops many executions from adding up to a large bill: budgets are per execution only | No usage records, no total across executions | Phase 3 (daily limit), Phase 5 (pause and resume, alerts) |
+| Nothing stops many executions from adding up to a large bill: budgets are per execution only | No usage records, no total across executions | Phase 3 (daily limit), Phase 8 (pause and resume, alerts) |
 | Only Node/TypeScript repositories can be fixed | Sandbox image `node:20-bookworm` and `npm ci --ignore-scripts` (`workspaceService.ts`); `npm run <script>` in `verifyWorkspace` and the `run_check` tool; `verificationConfig` holds npm script names; `repoContext.ts` reads `package.json`; default protected paths are npm files; prompts say "Node/TypeScript" | Phase 4 |
-| Tickets run one after another in a single process | Each consumer takes one message at a time (`channel.prefetch(1)`, `rabbitMQService.ts`); no concurrency setting | Phase 5 |
-| Parallel runs would share LLM rate limits with nothing coordinating them | Retries exist per call (`retry.ts`), but no shared limiter | Phase 5 |
-| API and workers always run in the same process | `src/index.ts` starts both | Phase 5 |
-| A run always uses the project's **first** agent, in no guaranteed order | `execution.project.agents[0]` in `executionGraph.ts`; `Agent` has no role field (the `AgentRole` enum is only used by `WorkItem`) | Phase 6 |
-| Plan approval approves almost nothing | `executionWorker.plan` submits a fixed template ("Investigate and fix: <title>") | Phase 6 |
-| Not real MCP; MCP resources never reach prompts | `mcpService` + one allowlisted HTTP connector | Phase 8 |
-| Vague tickets can miss the relevant code | File-name matching only | Phase 9 |
-| Review is one LLM call by the same agent; no memory between runs | `review_diff` in `executionGraph.ts` uses the run's agent; nothing is carried between executions | Phase 10 |
+| Tickets run one after another in a single process | Each consumer takes one message at a time (`channel.prefetch(1)`, `rabbitMQService.ts`); no concurrency setting | Phase 8 |
+| Parallel runs would share LLM rate limits with nothing coordinating them | Retries exist per call (`retry.ts`), but no shared limiter | Phase 8 |
+| API and workers always run in the same process | `src/index.ts` starts both | Phase 8 |
+| A run always uses the project's **first** agent, in no guaranteed order | `execution.project.agents[0]` in `executionGraph.ts`; `Agent` has no role field (the `AgentRole` enum is only used by `WorkItem`) | Phase 9 |
+| Plan approval approves almost nothing | `executionWorker.plan` submits a fixed template ("Investigate and fix: <title>") | Phase 9 |
+| Not real MCP; MCP resources never reach prompts | `mcpService` + one allowlisted HTTP connector | Phase 11 |
+| Vague tickets can miss the relevant code | File-name matching only | Phase 12 |
+| Review is one LLM call by the same agent; no memory between runs | `review_diff` in `executionGraph.ts` uses the run's agent; nothing is carried between executions | Phase 13 |
 
 ---
 
@@ -136,7 +188,7 @@ The benchmark only means something if every result is tied to the exact prompts 
 What this says about the next phases:
 
 - **Attempt 1 failed on output format in all 8 runs** (`actions` sent as an array). That is ~1 LLM call and 1 of 3 attempts wasted per ticket, and it cost scenario 7 its fix. First experiment: `implement.v2` (task below). The Phase 3 tool loop removes the free-text file format entirely.
-- **There is no way to decline a ticket.** An impossible or unsafe ticket ends `BLOCKED` only after burning every attempt, with "no FILE blocks" as the recorded reason. Phase 3's `finish(summary)` needs an explicit "cannot do / needs clarification" outcome, and Phase 6's planner should be able to stop at plan time.
+- **There is no way to decline a ticket.** An impossible or unsafe ticket ends `BLOCKED` only after burning every attempt, with "no FILE blocks" as the recorded reason. Phase 3's `finish(summary)` needs an explicit "cannot do / needs clarification" outcome, and Phase 9's planner should be able to stop at plan time.
 - **Hidden tests must also protect the exported API of the files a fix is likely to touch**, not only the bug. Scenario 6 showed a rewrite can pass every bug test while breaking a neighbouring function. Apply this rule when adding scenarios.
 
 ---
@@ -274,10 +326,10 @@ Budgets were per execution only, and only the agent loop's calls counted, so man
 - [x] Daily limit across all executions and tasks: `LLM_DAILY_TOKEN_LIMIT` (default 2,000,000 per UTC day; `0` switches it off). Checked before each call; once reached, new calls fail with `TokenLimitError` (not retried) and the execution fails with the reason. `GET /api/llm/usage/today` shows usage, limit and reset time
 - [x] The execution budget covers every call of the execution (plan, review, failure analysis and the loop), read from the ledger
 - [x] Configurable budgets for new executions: `EXECUTION_MAX_TOKENS` (default 200,000), `EXECUTION_MAX_DURATION_SECONDS` (default 1800)
-- [ ] Pause instead of fail: when the daily limit is hit, keep the execution queued and resume it after the reset, instead of failing it (Phase 5, with the shared rate limiter)
+- [ ] Pause instead of fail: when the daily limit is hit, keep the execution queued and resume it after the reset, instead of failing it (Phase 8, with the shared rate limiter)
 - [ ] Warn before the limit: a tracker comment or log alert at 80% of the daily limit
 - [ ] Limits in money: per-model prices in config, so limits and reports can be in dollars as well as tokens
-- [ ] Per-project or per-repository budgets, so one busy project cannot use the whole day's limit (Phase 5 fairness)
+- [ ] Per-project or per-repository budgets, so one busy project cannot use the whole day's limit (Phase 8 fairness)
 
 Known limits of the design: budgets are checked before each call, so a started call always finishes and a limit can be passed by one call (at most one call's input plus `LLM_MAX_OUTPUT_TOKENS`); provider calls that fail (errors, rate limits) report no usage and are not counted.
 
@@ -287,7 +339,7 @@ Known limits of the design: budgets are checked before each call, so a started c
 
 *Teaches: toolchain detection, general command tools for agents, enforcing policy on outcomes instead of on tools, multi-language evaluation.*
 
-**Goal:** the agent fixes bugs in a repository whatever its language, framework or platform (Node, PHP, Java, Python, Go, Rust, .NET, ...), the way a real coding agent does, with the same safety and the same measured quality.
+**Goal:** the agent fixes bugs in a repository whatever its language, framework or platform (Node, PHP, Java, Python, Go, Rust, .NET, ...), the way a real coding agent does, with the same safety and the same measured quality. Covers limitations 1, 2, 6, 7, 10, 12, 16, 17, 18, 19, 20 (static checks), 21 and 22.
 
 ### Design
 
@@ -310,13 +362,83 @@ Known limits of the design: budgets are checked before each call, so a started c
 - [ ] Language-neutral prompt versions
 - [ ] Benchmark: scenarios in at least two more languages (e.g. Python and PHP or Java), each with hidden tests and a fairness check in `tests/codingScenarios.test.js`; the Node scenarios must not regress
 - [ ] E2E: one execution end to end on a non-Node repository
+- [ ] Service containers (limitation 2): a repository declares the services its tests need (e.g. `postgres:16`, `redis:7`, with env vars); each run starts them on a private Docker network shared only with its sandbox (still no internet), and removes them afterwards
+- [ ] Private dependencies (limitation 6): per-repository registry credentials, stored encrypted like integration credentials and given to the install step only (never to the agent's sandbox); fetch git submodules and Git LFS files during clone with the same token handling
+- [ ] Checks from the toolchain (limitation 7): only checks that exist for the repository run; a configured check that is missing is reported as "not available", not as a failure, and a repository with no tests is flagged in the plan for the human approver
+- [ ] Configurable limits (limitation 10): sandbox CPU, memory, process count, check timeout, changed-file and file-size limits per repository, with the current values as defaults
+- [ ] Subprojects (limitation 12): detect several toolchains in one repository (monorepo packages, `frontend/` + `backend/`), and run the checks of the subprojects the change touches, in their directories
+- [ ] Make `tool_loop` the default mode (limitation 16) once the multi-language benchmark confirms it; keep `single_shot` selectable
+- [ ] Test secrets and environment (limitation 17): per-repository environment variables and files for checks, stored encrypted; only test-grade values, because the agent can read anything inside its sandbox
+- [ ] Flaky and slow suites (limitation 18): run the checks once on the unmodified code first and record failures that already exist, so the change is judged only on what it broke or fixed; re-run a failing test once to tell flaky from broken; run the tests related to the change first, then the full suite
+- [ ] Few or no tests (limitation 19): report how much the checks actually cover in the plan and the PR, so the human knows when "verified" means little; Phase 6 adds writing the missing tests as a task
+- [ ] Infrastructure repositories (limitation 20): toolchain presets with static checks that need no cloud access (`terraform validate`, `tflint`, `helm lint`, `kubeconform`, `ansible-lint`)
+- [ ] Large repositories (limitation 21): partial clone (`--filter=blob:none`, shallow where possible) from a cached mirror per repository, `search_code` backed by `git grep` or ripgrep in the sandbox, a paged file tree, and focusing on the touched subproject
+- [ ] Model coverage (limitation 22): run the benchmark and the reference projects on at least one stronger model, and allow the model to be chosen per repository or task type
+- [ ] Reference projects: build the matrix in [Reference projects](#reference-projects), with hidden tests and a setup check like `npm run eval:coding -- --check`; run it to finish this phase
 - [ ] README: supported toolchains, how to add a preset, how to override per repository
 
-**Done when:** the benchmark passes in at least three languages with no drop on the Node scenarios, and an e2e execution opens a draft PR on a non-Node repository.
+**Done when:** the benchmark passes in at least three languages with no drop on the Node scenarios, a scenario whose tests need a database passes, an e2e execution opens a draft PR on a non-Node repository, and the reference projects have been run with every failure recorded as a limitation.
 
 ---
 
-## Phase 5: Parallel executions (several tickets at once)
+## Phase 5: Any source host and issue tracker
+
+*Teaches: adapter design across vendors, ticket context beyond text, branch strategy.*
+
+**Goal:** tickets can come from the tracker a team uses and changes can go to the source host it uses, with everything the ticket contains. Covers limitations 4, 5, 11, 13 and 23 (for ticket content).
+
+### Tasks
+
+- [ ] `SourceControlAdapter` interface (clone, base SHA, push, open draft PR, comment, read PR state), with the GitHub App implementation moved behind it, like `IssueTrackerAdapter` for trackers
+- [ ] GitLab adapter, then Bitbucket and Azure DevOps; credentials encrypted and redacted like the existing ones
+- [ ] Tracker adapters for Jira, Linear and GitHub Issues, each keeping a stable `revisionHash`
+- [ ] Ticket context: attachments (images, logs, files) and comments fetched by each adapter, size-capped, stored with the work item and given to the agent (images to models that accept them, text otherwise); attachment content is untrusted input, never instructions
+- [ ] Target branch: per repository (default branch, or a configured one) and per ticket (e.g. a label or field naming a release branch); PRs open against that branch
+- [ ] Prompt injection (limitation 23): ticket text, attachments, comments and repository files are marked as untrusted data in prompts, the tools' policy (not the prompt) decides what is allowed, and a benchmark scenario plants instructions in a ticket and an attachment to prove they are ignored
+- [ ] E2E: one execution from a non-Trello tracker to a non-GitHub host
+
+**Done when:** an execution runs end to end with at least one other tracker and one other source host, and a ticket whose key evidence is in an attachment is fixed using it.
+
+---
+
+## Phase 6: Any kind of task
+
+*Teaches: task typing, decomposition, multi-repository changes, evaluating more than bug fixes.*
+
+**Goal:** the agent handles the work teams actually ticket, not only bug fixes. Covers limitations 8, 9 and 19 (writing missing tests).
+
+### Tasks
+
+- [ ] Task types: bug fix, feature, refactor, dependency upgrade, migration, test/documentation work; detected from the ticket or set by a label, recorded on the execution
+- [ ] When the touched code has few or no tests (limitation 19), the agent writes characterising tests before changing it, and the plan says so
+- [ ] Prompt versions per task type (what "done" means differs: a refactor must keep behaviour, a feature needs new tests, an upgrade must keep the build green)
+- [ ] Plans with several tasks and dependencies (the `PlanTask` model already has dependencies), executed in order within one execution; the plan the human approves lists them
+- [ ] Changes across several repositories in one execution (one workspace and one PR per repository, linked to each other and to the ticket), with all of them verified before any is published
+- [ ] Benchmark scenarios for each task type, in more than one language, with hidden tests (a feature scenario, a refactor scenario that must keep behaviour, an upgrade scenario)
+
+**Done when:** the benchmark covers every task type and a two-repository ticket produces two linked draft PRs that both pass their checks.
+
+---
+
+## Phase 7: Feedback loop after the PR
+
+*Teaches: event-driven follow-up work, acting on human and CI feedback, bounded iteration.*
+
+**Goal:** like a human developer, the agent responds to review comments and failing CI on its own PR. Covers limitation 14 and 23 (for PR comments).
+
+### Tasks
+
+- [ ] Receive PR review comments and CI results (webhooks or polling, through the source-control adapter)
+- [ ] A follow-up attempt on the same branch with the comments or CI failure as feedback; it goes through the same policy, verification, review and publish approval as the first change
+- [ ] Bounds: a maximum number of follow-up rounds per PR, within the execution's token and time budget; then hand back to the human with a comment
+- [ ] Only comments from allowed reviewers trigger work; comment text is untrusted input (limitation 23), with a scenario that plants instructions in a review comment
+- [ ] E2E: a review comment on the agent's PR leads to a second commit that addresses it
+
+**Done when:** the agent addresses a review comment and a failing CI run on its own PR end to end.
+
+---
+
+## Phase 8: Parallel executions (several tickets at once)
 
 *Teaches: concurrency in agent systems, isolation, shared rate limits, scaling workers.*
 
@@ -343,7 +465,7 @@ What already makes this safe: each execution has its own workspace folder, Docke
 
 ---
 
-## Phase 6: Agent roles and a real planner
+## Phase 9: Agent roles and a real planner
 
 *Teaches: assigning agents to jobs, separating planning from doing, making human review meaningful.*
 
@@ -362,11 +484,11 @@ What already makes this safe: each execution has its own workspace folder, Docke
 
 ---
 
-## Phase 7: Agent skills
+## Phase 10: Agent skills
 
 *Teaches: packaging reusable know-how for agents, progressive disclosure, context budgets, prompt-injection risk.*
 
-Comes after the agent loop (Phase 3) and roles (Phase 6), because skills are loaded through a tool and assigned per role.
+Comes after the agent loop (Phase 3) and roles (Phase 9), because skills are loaded through a tool and assigned per role.
 
 ### Design
 
@@ -390,7 +512,7 @@ Comes after the agent loop (Phase 3) and roles (Phase 6), because skills are loa
 
 ---
 
-## Phase 8: Real MCP
+## Phase 11: Real MCP
 
 *Teaches: Model Context Protocol, standard tool discovery, connecting servers.*
 
@@ -399,14 +521,14 @@ Comes after the agent loop (Phase 3) and roles (Phase 6), because skills are loa
 - [ ] Expose the Phase 2 sandbox tools as an MCP server using the official SDK
 - [ ] Make the agent loop an MCP client that discovers tools instead of hard-coding them
 - [ ] Allow attaching allowlisted external MCP servers (e.g. documentation), reusing the connector registry and `MCP_HTTP_ALLOWED_HOSTS` rules
-- [ ] Make assigned MCP resources available to the agent (an existing gap; skills are handled in Phase 7)
+- [ ] Make assigned MCP resources available to the agent (an existing gap; skills are handled in Phase 10)
 - [ ] Update the README "Known limits" section
 
 **Done when:** the agent loop runs entirely through MCP tool discovery, and an external server can be attached safely.
 
 ---
 
-## Phase 9: Retrieval
+## Phase 12: Retrieval
 
 *Teaches: embeddings, chunking, search quality.*
 
@@ -414,17 +536,18 @@ Comes after the agent loop (Phase 3) and roles (Phase 6), because skills are loa
 
 - [ ] Chunk the cloned repository and store embeddings in Postgres with pgvector (migration + index)
 - [ ] `semantic_search(query)` tool
+- [ ] Large repositories (limitation 21): index incrementally per commit and per subproject, so a big repository is not re-embedded for every execution
 - [ ] Benchmark scenario 6 (vague ticket) with and without it
 
 **Done when:** scenario 6 results are recorded with and without retrieval.
 
 ---
 
-## Phase 10: Collaborating agents and memory
+## Phase 13: Collaborating agents and memory
 
 *Teaches: dividing work between agents, explicit hand-offs, long-term memory.*
 
-Phase 5 runs many agents side by side on **different** tickets. This phase has several agents cooperate on the **same** ticket.
+Phase 8 runs many agents side by side on **different** tickets. This phase has several agents cooperate on the **same** ticket.
 
 ### Design rules: limit error sources
 
@@ -440,7 +563,7 @@ Free-form agent conversation is deliberately **out of scope**. Agents chatting u
 
 ### Tasks
 
-- [ ] Independent reviewer agent (the `REVIEWER` role from Phase 6) replacing the single review call, following rules 1, 4 and 5
+- [ ] Independent reviewer agent (the `REVIEWER` role from Phase 9) replacing the single review call, following rules 1, 4 and 5
 - [ ] Zod schema for the reviewer's output; invalid output fails the review instead of being guessed at
 - [ ] Review loop as graph edges: `request_changes` sends the structured issues back to the implementer, capped at 2 rounds, then `BLOCKED`
 - [ ] Every hand-off recorded as an execution event (sender role, schema version, payload), so each decision can be traced
@@ -448,6 +571,23 @@ Free-form agent conversation is deliberately **out of scope**. Agents chatting u
 - [ ] Benchmark each feature separately against the baseline: reviewer, review loop, memory
 
 **Done when:** the effect of each feature is recorded in the results log, and any feature that did not improve wrong-fix-shipped or cost per success has been removed.
+
+---
+
+## Phase 14: Other platforms and running the app
+
+*Teaches: heterogeneous execution environments, runtime verification, observing a running system.*
+
+**Goal:** work that can't be built or tested in a Linux container, and bugs that only show when the app runs, are in reach too. Covers limitations 3, 15 and 20 (checks against real environments, e.g. `terraform plan` with scoped credentials). Listed last because it needs infrastructure beyond Docker (macOS and Windows machines, emulators), not because it matters less; parts can be pulled forward (headless browsers run in Linux containers).
+
+### Tasks
+
+- [ ] Platform runners: the toolchain names the platform (Linux container, macOS, Windows, Android emulator, GPU), and runs go to a runner that provides it (self-hosted machines or a cloud CI provider), with the same isolation, limits and recording
+- [ ] Headless browser in the sandbox for browser tests (Playwright, Cypress) and for checking web UIs
+- [ ] Run-the-app tools: start the app in the sandbox (with its services), send HTTP requests, take browser screenshots, read logs, so the agent can reproduce a bug before fixing it and confirm the fix after
+- [ ] Benchmark scenarios that need the running app (a UI bug, an HTTP API bug) and at least one non-Linux platform
+
+**Done when:** a UI bug is reproduced and fixed with a screenshot as evidence, and one scenario runs on a non-Linux platform.
 
 ---
 

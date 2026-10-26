@@ -32,13 +32,16 @@ New test files must be added to the explicit list in the `test` script in `packa
 
 The coding benchmark (`tests/e2e/codingEval.js`) uses `tests/e2e/coding-scenarios/`: `repo/` is the clean project, each `NN-*/` has `scenario.json`, `bug/` (files planting the bug) and `hidden.test.js`. Hidden tests must never be pushed to the sandbox repo. `tests/codingScenarios.test.js` (in `npm test`) proves each scenario is valid; keep it passing when editing scenarios.
 
-## Language-agnostic requirement
+## No lock-in requirement
 
-The agent must work on repositories in **any language, framework and platform** (PHP, Java, Python, Go, Rust, .NET, Node, ...), not only Node/TypeScript. Today the execution pipeline is still Node-only (`node:20` sandbox image, `npm ci`, `npm run <script>` checks, `package.json`-based context, prompts that say "Node/TypeScript"); removing that is Phase 4 of `docs/plans/AGENTIC_ROADMAP.md`. Until then, and in all new work:
+The agent must work on repositories in **any language, framework and platform** (PHP, Java, Python, Go, Rust, .NET, Node, ...), from any source host and issue tracker, and on any kind of task, not only Node/TypeScript bug fixes from Trello to GitHub. Today it is still limited in all of these ways; every known limitation, where it is in the code and the phase that removes it, is in the "Known limitations" table of `docs/plans/AGENTIC_ROADMAP.md` (language and toolchain: Phase 4; source host, tracker, ticket attachments, target branch: Phase 5; task types and multi-repository work: Phase 6; PR feedback: Phase 7; non-Linux platforms and running the app: Phase 14). In all new work:
 
 - Never hard-code a language, package manager, build tool, test runner or test-file pattern in new code or prompts; take it from the repository's detected or configured toolchain.
-- Prompts say "a checked-out repository" and get the language and check commands as variables.
+- Prompts say "a checked-out repository" and get the language, task type and check commands as variables; they don't assume the task is a bug fix.
+- Don't add vendor-specific logic (GitHub, Trello, a model provider) outside its adapter; go through the adapter interfaces.
+- Limits (sizes, timeouts, resources) are configurable per repository, with today's values as defaults.
 - When changing Node-specific code (`workspaceService.ts`, `run_check`, `verifyWorkspace`, `repoContext.ts`, default protected paths), move it toward the toolchain model instead of extending the npm path.
+- A newly found limitation of this kind goes into the roadmap's "Known limitations" table. From Phase 4 on, each phase is confirmed on the roadmap's reference projects (real projects in different stacks), which is where unknown limitations are expected to show up.
 
 ## Architecture
 
