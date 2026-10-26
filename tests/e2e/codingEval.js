@@ -341,7 +341,7 @@ const writeReport = (results, meta) => {
     file = path.join(REPORT_DIR, `coding-eval-${meta.date}-${suffix}.md`);
   fs.writeFileSync(file, lines.join("\n"));
 
-  const logRow = `| ${meta.date} | | single_shot | ${env("E2E_LLM_MODEL")} | ${promptList} | none | ${summary.runs} | ${summary.correct} | ${summary.wrong} | ${summary.blocked} | ${summary.infra} | ${summary.avgAttempts} | [report](../testing/${path.basename(file)}) |`;
+  const logRow = `| ${meta.date} | | ${[...new Set(results.map((result) => result.agentMode).filter(Boolean))].join(", ") || "unknown"} | ${env("E2E_LLM_MODEL")} | ${promptList} | none | ${summary.runs} | ${summary.correct} | ${summary.wrong} | ${summary.blocked} | ${summary.infra} | ${summary.avgAttempts} | [report](../testing/${path.basename(file)}) |`;
   return { file, summary, logRow };
 };
 

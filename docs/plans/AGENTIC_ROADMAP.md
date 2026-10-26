@@ -226,6 +226,7 @@ The tools are not used by the run graph yet; Phase 3 wires them into the agent l
 - [x] Feature flag `EXECUTION_AGENT_MODE=single_shot|tool_loop` so both modes run through the benchmark
 - [x] Execution events for each step, so a run can be replayed from `GET /api/executions/:id`
 - [x] Update the README run-graph diagram
+- [x] Run an execution end to end in `tool_loop` mode (scenario 01, 2026-10-26)
 - [ ] Run the e2e execution suite in `tool_loop` mode
 - [ ] Benchmark `tool_loop` and record it next to the baseline (needs more quota than the free tier: see below)
 
@@ -239,6 +240,7 @@ The tools are not used by the run graph yet; Phase 3 wires them into the agent l
 - **Stopping:** `finish done` with changes goes on to policy, verification and review. `finish done` with no changes, running out of steps, or replying twice without a tool call fails the attempt and retries. `finish blocked` (the agent declines) and an exhausted token or time budget block the execution without retrying. This answers the Phase 0 finding that the implement step could not decline a ticket.
 - **Context management:** tool results older than the 8 most recent are replaced with their first line and a note; no message is removed, because every provider needs each tool call paired with its result, and assistant turns keep their raw content for replay.
 - **Live check (2026-10-26),** without the DB or GitHub: `gemini-flash-lite-latest`, real tools and sandbox, scenario 01. It listed, read the code and test, ran the tests, edited, was denied editing the existing test, created a new test file, re-ran the tests and finished: 10 steps, about 27k tokens, 91 s. The hidden tests passed (graded in a network-less container).
+- **First pipeline run (2026-10-26),** scenario 01 through the server: correct fix in 7 loop steps, verified, reviewed and turned into a diff artifact; every tool call has a `ToolCall` row (the denied one with its reason) and the sandbox container was removed. It used 85k tokens because each step re-sends about 11k tokens of prompt, mostly the repository context that `inspect_repo` collects for single-shot mode. In tool-loop mode the agent can read files itself, so an `agent.v2` that sends a short file list instead would cut tokens per step sharply; to try with the benchmark.
 - **Quota and budget:** that easy fix cost 10 model calls and ~27k tokens against ~4 calls in single-shot mode. A benchmark run of 8 scenarios is roughly 80–200 calls, beyond the Gemini free tier per day; the default `maxTokens` of 200k allows about 3–7 such attempts. Revisit the default after the benchmark.
 
 ---
@@ -384,3 +386,4 @@ One row per benchmark run, newest last.
 | Date | Phase / change | Mode | Model | Prompt versions | Skills | Runs | Correct fix | Wrong fix shipped | Correctly blocked | Infra failures | Avg attempts | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-10-25 | 0. Baseline | single_shot | gemini-flash-lite-latest | plan.v1, review.v1, analyze.v1, implement.v1, file-format.v1 | none | 8 (1 per scenario) | 5 | 1 | 1 | 0 | 2.25 | Pass rate 75% (6/8), wrong-fix-shipped 13% (1/8), 33 LLM calls, code `0356a2a`+grader fixes. 1 no fix (#7). Reports: [10-24](../testing/coding-eval-2026-10-24.md), [10-24-2](../testing/coding-eval-2026-10-24-2.md), [10-25](../testing/coding-eval-2026-10-25.md), [10-25-2](../testing/coding-eval-2026-10-25-2.md) |
+| 2026-10-26 | 3. Agent loop (partial) | tool_loop | gemini-flash-lite-latest | plan.v1, agent.v1, review.v1, analyze.v1 | none | 1 (scenario 01 only) | 1 | 0 | 0 | 0 | 1.0 | Pipeline check, not a benchmark: 7 loop steps + plan + review, 85k loop tokens, code `51238e9`. [report](../testing/coding-eval-2026-10-26.md) |
