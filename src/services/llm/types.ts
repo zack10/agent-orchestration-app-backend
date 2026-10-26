@@ -4,7 +4,7 @@ export interface LLMProvider {
     model: string,
     prompt: { system?: string; user: string },
     apiKey?: string,
-  ): Promise<string>;
+  ): Promise<TextResult>;
   generateWithTools(
     model: string,
     request: ToolRequest,
@@ -61,6 +61,11 @@ export interface ToolRequest {
 export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
+}
+
+export interface TextResult {
+  text: string;
+  usage?: TokenUsage;
 }
 
 export interface ToolTurn {

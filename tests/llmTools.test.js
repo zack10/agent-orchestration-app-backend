@@ -26,7 +26,8 @@ const registry = new ProviderRegistry(
   "gemini",
   "gemini-flash-latest",
 );
-const llm = new LLMService(registry);
+// No usage ledger: these tests are about request and reply mapping.
+const llm = new LLMService(registry, null);
 
 /** Answers axios.post with `replies` in order and records each request body. */
 const scripted = (t, replies) => {

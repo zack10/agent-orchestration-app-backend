@@ -37,7 +37,8 @@ Found while reviewing the code after the first passing end-to-end run (draft PR 
 | Repo context is chosen by **file name** only | `repoContext.ts` scores paths by ticket words, max 12 files | Phases 2, 6 |
 | Files are cut at **20 KB** but the agent returns **whole files** | `MAX_FILE_BYTES` in `repoContext.ts` + whole-file `FILE` blocks; large files can be silently truncated | Phase 2 |
 | The agent can **edit or delete existing tests** to pass verification | Default `protectedPaths` covers only `package.json`, `package-lock.json`, `.github` | Phases 0 (hidden tests), 2 (tool policy) |
-| ~~`Execution.budget.maxTokens` is stored but never enforced~~ Enforced for agent-loop calls (single-shot calls don't report usage) | `createExecution` in `executionService.ts` | Phase 3 |
+| ~~`Execution.budget.maxTokens` is stored but never enforced~~ Enforced for every model call of an execution, plus a daily limit across all of them (see "Cost guardrails") | `createExecution` in `executionService.ts` | Phase 3 |
+| Nothing stops many executions from adding up to a large bill: budgets are per execution only | No usage records, no total across executions | Phase 3 (daily limit), Phase 4 (pause and resume, alerts) |
 | Tickets run one after another in a single process | Each consumer takes one message at a time (`channel.prefetch(1)`, `rabbitMQService.ts`); no concurrency setting | Phase 4 |
 | Parallel runs would share LLM rate limits with nothing coordinating them | Retries exist per call (`retry.ts`), but no shared limiter | Phase 4 |
 | API and workers always run in the same process | `src/index.ts` starts both | Phase 4 |
@@ -260,6 +261,21 @@ The tools are not used by the run graph yet; Phase 3 wires them into the agent l
   - One run per scenario: the 8 × 3 run on a stronger model still waits for a paid key.
 - **Quota and budget:** that easy fix cost 10 model calls and ~27k tokens against ~4 calls in single-shot mode. A benchmark run of 8 scenarios is roughly 80–200 calls, beyond the Gemini free tier per day; the default `maxTokens` of 200k allows about 3–7 such attempts. Revisit the default after the benchmark.
 
+### Cost guardrails
+
+Budgets were per execution only, and only the agent loop's calls counted, so many executions could add up to an unbounded bill. Everything the agent spends now goes through one ledger.
+
+- [x] Every model call records its tokens in `LlmUsage` (provider, model, purpose such as `plan.v1` or `agent.v2`, execution or task), in `LLMService`, so no pipeline can bypass it. No foreign keys: deleting an execution must not lower today's total
+- [x] Daily limit across all executions and tasks: `LLM_DAILY_TOKEN_LIMIT` (default 2,000,000 per UTC day; `0` switches it off). Checked before each call; once reached, new calls fail with `TokenLimitError` (not retried) and the execution fails with the reason. `GET /api/llm/usage/today` shows usage, limit and reset time
+- [x] The execution budget covers every call of the execution (plan, review, failure analysis and the loop), read from the ledger
+- [x] Configurable budgets for new executions: `EXECUTION_MAX_TOKENS` (default 200,000), `EXECUTION_MAX_DURATION_SECONDS` (default 1800)
+- [ ] Pause instead of fail: when the daily limit is hit, keep the execution queued and resume it after the reset, instead of failing it (Phase 4, with the shared rate limiter)
+- [ ] Warn before the limit: a tracker comment or log alert at 80% of the daily limit
+- [ ] Limits in money: per-model prices in config, so limits and reports can be in dollars as well as tokens
+- [ ] Per-project or per-repository budgets, so one busy project cannot use the whole day's limit (Phase 4 fairness)
+
+Known limits of the design: budgets are checked before each call, so a started call always finishes and a limit can be passed by one call (at most one call's input plus `LLM_MAX_OUTPUT_TOKENS`); provider calls that fail (errors, rate limits) report no usage and are not counted.
+
 ---
 
 ## Phase 4: Parallel executions (several tickets at once)
@@ -276,7 +292,8 @@ What already makes this safe: each execution has its own workspace folder, Docke
 - [ ] Resource cap: a maximum number of concurrent Docker runs per process, sized to the host (each run is limited to 2 CPUs / 2 GB today)
 - [ ] Shared LLM rate limiter keyed by provider + API key (per-minute requests and tokens), so parallel runs queue for capacity instead of all hitting `429`; in-process first, then Postgres- or Redis-backed for multiple processes
 - [ ] Process roles: `PROCESS_ROLE=api|worker|all` (default `all`), so workers can scale separately from the API
-- [ ] Fairness: one project's backlog cannot starve another's (e.g. a per-project concurrency cap)
+- [ ] Fairness: one project's backlog cannot starve another's (e.g. a per-project concurrency cap), including a per-project share of `LLM_DAILY_TOKEN_LIMIT`
+- [ ] When the daily token limit is reached, pause queued and running executions and resume them after the reset (see Phase 3 "Cost guardrails")
 - [ ] Visibility: running and queued executions per project via the API (and queue depth in `/health` or a status endpoint)
 - [ ] Isolation audit: confirm nothing is shared between runs (workspace and artifact paths, branch names, temp files, Trello comments, `TaskAttempt` numbering)
 - [ ] Unit tests: concurrency limits respected, rate limiter waits rather than fails, per-project cap

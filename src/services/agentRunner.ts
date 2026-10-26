@@ -107,6 +107,7 @@ export const runAgent = async (taskId: string) => {
       model,
       prompt,
       apiKey,
+      { purpose: "task", taskId },
     );
     const parsed = parseAgentOutput(rawOutput);
 

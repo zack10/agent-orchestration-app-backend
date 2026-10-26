@@ -1,5 +1,6 @@
 import { ApprovalType, ExecutionStatus, Prisma } from "@prisma/client";
 import crypto from "crypto";
+import { config } from "../config";
 import prisma from "../db";
 import { AppError } from "../errors/AppError";
 
@@ -52,8 +53,8 @@ export const createExecution = async (input: {
         budget: {
           maxAttempts: 3,
           maxChangedFiles: 20,
-          maxDurationSeconds: 1800,
-          maxTokens: 200000,
+          maxDurationSeconds: config.executionMaxDurationSeconds,
+          maxTokens: config.executionMaxTokens,
         },
       },
     });

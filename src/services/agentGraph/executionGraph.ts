@@ -9,6 +9,7 @@ import { writeActionsToRoot } from "../../utils/codeWriter";
 import { decrypt } from "../../utils/crypto";
 import {
   EXECUTION_PROMPTS,
+  RenderedPrompt,
   executionPromptFragment,
   renderExecutionPrompt,
 } from "../../prompts";
@@ -17,6 +18,7 @@ import { parseAgentOutput } from "../../utils/llmUtils";
 import { hashSnapshot } from "../executionService";
 import { LLMService } from "../llm/LLMService";
 import { ToolRequest } from "../llm/types";
+import { TokenLimitError, prismaUsageLedger } from "../llm/usageLedger";
 import { SANDBOX_TOOLS } from "../sandbox/tools";
 import {
   executionToolContext,
@@ -102,11 +104,6 @@ const ExecutionGraphState = Annotation.Root({
     reducer: (_current, update) => update,
     default: () => 0,
   }),
-  // Tokens spent by agent loops so far (single-shot calls report none).
-  tokensUsed: Annotation<number>({
-    reducer: (_current, update) => update,
-    default: () => 0,
-  }),
 });
 
 type GraphState = typeof ExecutionGraphState.State;
@@ -117,18 +114,38 @@ const requireAgent = (state: GraphState) => {
   return { provider: state.agentProvider, model: state.agentModel };
 };
 
-/** Sends a prompt to the run's agent (provider and model resolved in load_context). */
-const askAgent = (
-  state: GraphState,
-  prompt: { system?: string; user: string },
-) => {
+/** Tokens every model call of this execution has used, from the usage ledger. */
+const executionTokensUsed = (state: GraphState) =>
+  prismaUsageLedger.tokensUsedByExecution(state.executionId);
+
+/**
+ * Sends a prompt to the run's agent (provider and model resolved in
+ * load_context). Refused once the execution's token budget is used up,
+ * which covers the plan, review and analysis calls as well as the loop.
+ */
+const askAgent = async (state: GraphState, prompt: RenderedPrompt) => {
   const { provider, model } = requireAgent(state);
-  return llm.generateContent(provider, model, prompt, state.agentApiKey);
+  const used = await executionTokensUsed(state);
+  if (used >= state.maxTokens)
+    throw new TokenLimitError(
+      `Execution token budget reached: ${used} of ${state.maxTokens} tokens used (budget.maxTokens)`,
+    );
+  return llm.generateContent(provider, model, prompt, state.agentApiKey, {
+    purpose: prompt.version,
+    executionId: state.executionId,
+  });
 };
 
-const askAgentWithTools = (state: GraphState, request: ToolRequest) => {
+const askAgentWithTools = (
+  state: GraphState,
+  request: ToolRequest,
+  purpose: string,
+) => {
   const { provider, model } = requireAgent(state);
-  return llm.generateWithTools(provider, model, request, state.agentApiKey);
+  return llm.generateWithTools(provider, model, request, state.agentApiKey, {
+    purpose,
+    executionId: state.executionId,
+  });
 };
 
 /** The prompts a mode actually uses, recorded with every run. */
@@ -439,6 +456,9 @@ const agentLoop = async (state: GraphState) => {
     checkScripts: ctx.checkScripts.join(", ") || "none",
   });
 
+  // The loop gets what is left of the execution's budget after planning
+  // and any earlier attempts.
+  const usedBefore = await executionTokensUsed(state);
   await startSandbox(state.executionId);
   let outcome: Awaited<ReturnType<typeof runAgentLoop>>;
   try {
@@ -449,12 +469,12 @@ const agentLoop = async (state: GraphState) => {
         tools: SANDBOX_TOOLS,
         budget: {
           maxSteps: state.maxSteps,
-          maxTokens: Math.max(0, state.maxTokens - state.tokensUsed),
+          maxTokens: Math.max(0, state.maxTokens - usedBefore),
           deadline: state.deadline,
         },
       },
       {
-        generate: (request) => askAgentWithTools(state, request),
+        generate: (request) => askAgentWithTools(state, request, prompt.version),
         runTool: (call) => runRecordedTool(ctx, call, recorder),
         // One event per model call; full tool input and output are in ToolCall.
         onStep: (step) =>
@@ -478,8 +498,7 @@ const agentLoop = async (state: GraphState) => {
     await stopSandbox(state.executionId);
   }
 
-  const tokensUsed =
-    state.tokensUsed + outcome.usage.inputTokens + outcome.usage.outputTokens;
+  const tokensUsed = usedBefore + outcome.usage.inputTokens + outcome.usage.outputTokens;
   await graphEvent(state.executionId, "GRAPH_AGENT_FINISHED", {
     attemptId: attempt.id,
     attemptNumber,
@@ -493,7 +512,7 @@ const agentLoop = async (state: GraphState) => {
   let failure: string;
   if (outcome.stopReason === "done") {
     if ((await changedFiles(state.executionId)).length > 0)
-      return { attemptNumber, attemptId: attempt.id, tokensUsed, route: "implemented" as GraphRoute };
+      return { attemptNumber, attemptId: attempt.id, route: "implemented" as GraphRoute };
     failure = `The agent called finish without changing any files: ${outcome.summary}`;
   } else {
     failure = `${LOOP_FAILURES[outcome.stopReason]}: ${outcome.summary}`;
@@ -512,7 +531,6 @@ const agentLoop = async (state: GraphState) => {
   return {
     attemptNumber,
     attemptId: attempt.id,
-    tokensUsed,
     lastFailure: failure,
     route: (final ? "blocked" : "retry") as GraphRoute,
   };

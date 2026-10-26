@@ -25,6 +25,16 @@ const parseAgentMode = (value: string | undefined): ExecutionAgentMode => {
   );
 };
 
+/** Like parsePositiveInt, but 0 is allowed (it switches a limit off). */
+const parseNonNegativeInt = (
+  value: string | undefined,
+  fallback: number,
+): number => {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+};
+
 export const config = {
   nodeEnv: process.env.NODE_ENV ?? "development",
   port: parsePositiveInt(process.env.PORT, 3001),
@@ -94,6 +104,18 @@ export const config = {
   executionAgentMode: parseAgentMode(process.env.EXECUTION_AGENT_MODE),
   // Model calls per attempt in tool_loop mode (an execution's budget.maxSteps wins).
   agentMaxSteps: parsePositiveInt(process.env.AGENT_MAX_STEPS, 30),
+  // Tokens all model calls together may use per UTC day; 0 switches it off.
+  llmDailyTokenLimit: parseNonNegativeInt(
+    process.env.LLM_DAILY_TOKEN_LIMIT,
+    2_000_000,
+  ),
+  // Budget given to each new execution (stored on it, so changing these
+  // affects only executions created afterwards).
+  executionMaxTokens: parsePositiveInt(process.env.EXECUTION_MAX_TOKENS, 200_000),
+  executionMaxDurationSeconds: parsePositiveInt(
+    process.env.EXECUTION_MAX_DURATION_SECONDS,
+    1800,
+  ),
   storeRawLlmOutput: process.env.STORE_RAW_LLM_OUTPUT === "true",
 };
 

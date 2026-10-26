@@ -39,6 +39,14 @@ router.get(
   }),
 );
 
+// Tokens all model calls used today (UTC), against LLM_DAILY_TOKEN_LIMIT.
+router.get(
+  "/usage/today",
+  asyncHandler(async (_req, res) => {
+    res.json(await llmService.usageToday());
+  }),
+);
+
 router.get(
   "/usage",
   validate(providerQuerySchema),

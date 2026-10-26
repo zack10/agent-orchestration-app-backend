@@ -234,6 +234,15 @@ flowchart TD
 
 In both modes, policy, verification and review run afterwards, independently of what the agent reports.
 
+#### Token limits
+
+Every model call, from either pipeline, is recorded in the `LlmUsage` table with its tokens and what it was for (`plan.v1`, `agent.v2`, `task`, ...). Two limits are checked before each call:
+
+- **Per execution:** `budget.maxTokens` on the execution (set from `EXECUTION_MAX_TOKENS` when it is created, default 200,000) covers all of its calls: plan, loop, review and failure analysis.
+- **Per day, across everything:** `LLM_DAILY_TOKEN_LIMIT` (default 2,000,000 per UTC day, `0` to switch off). Once reached, new calls fail with a `TokenLimitError` that is not retried, and the execution fails with the reason. `GET /api/llm/usage/today` returns `{ used, limit, resetsAt }`.
+
+A call that has started always finishes, so a limit can be passed by one call.
+
 The LLM steps' prompts are versioned files in `src/prompts/execution/` (e.g. `implement.v1.md`). Each has a system part (fixed instructions) and a user part (ticket details). The active versions are listed in `src/prompts/index.ts`, and each run records them in its execution events (`promptVersions`, `promptVersion`). To change wording, add a new version instead of editing a released one.
 
 The agent returns whole files in this format inside a JSON `actions` string; anything else is rejected and retried:
@@ -373,7 +382,7 @@ All routes are under `/api` and require the bearer token.
 | Agents | `POST/GET /agents`, `GET/PUT/DELETE /agents/:id` |
 | Skills | `POST/GET /skills`, `GET/PUT/DELETE /skills/:id`, `POST /skills/assign` |
 | Tasks | `POST /tasks` (202, `Idempotency-Key`), `GET /tasks`, `GET /tasks/:id` |
-| LLM | `GET /llm/providers`, `POST /llm/discover`, `GET /llm/models` (`X-Provider-Api-Key`), `GET /llm/usage` |
+| LLM | `GET /llm/providers`, `POST /llm/discover`, `GET /llm/models` (`X-Provider-Api-Key`), `GET /llm/usage`, `GET /llm/usage/today` (tokens used today against `LLM_DAILY_TOKEN_LIMIT`) |
 | Repositories | `POST/GET /repositories` |
 | Integrations | `POST/GET /integrations`, `POST /integrations/:id/sync` |
 | Work items | `GET /work-items`, `GET /work-items/:id` |
@@ -393,9 +402,9 @@ Behaviour worth knowing:
 | --- | --- |
 | Core | `NODE_ENV`, `PORT`, `DATABASE_URL`, `RABBITMQ_URL`, `ENCRYPTION_KEY` |
 | API access | `API_AUTH_TOKEN`, `API_AUTH_ACTOR`, `AUTH_DISABLED`, `CORS_ORIGINS`, `API_RATE_LIMIT_PER_MINUTE` |
-| LLM | `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `LLM_PROVIDERS`, `LLM_DEFAULT_PROVIDER`, `LLM_DEFAULT_MODEL`, `LLM_REQUEST_TIMEOUT_MS`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_RATE_LIMIT_RETRIES` |
+| LLM | `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `LLM_PROVIDERS`, `LLM_DEFAULT_PROVIDER`, `LLM_DEFAULT_MODEL`, `LLM_DAILY_TOKEN_LIMIT`, `LLM_REQUEST_TIMEOUT_MS`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_RATE_LIMIT_RETRIES` |
 | Task pipeline | `TASK_MAX_ATTEMPTS`, `TASK_RETRY_DELAY_MS`, `TASK_LEASE_MS`, `GENERATED_CODE_MAX_FILES`, `GENERATED_CODE_MAX_FILE_BYTES`, `STORE_RAW_LLM_OUTPUT` |
-| Execution pipeline | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `INTEGRATION_POLL_INTERVAL_MS`, `EXECUTION_LEASE_MS`, `EXECUTION_AGENT_MODE`, `AGENT_MAX_STEPS`, `WORKSPACE_ROOT`, `KEEP_WORKSPACES`, `ARTIFACT_ROOT` |
+| Execution pipeline | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `INTEGRATION_POLL_INTERVAL_MS`, `EXECUTION_LEASE_MS`, `EXECUTION_AGENT_MODE`, `AGENT_MAX_STEPS`, `EXECUTION_MAX_TOKENS`, `EXECUTION_MAX_DURATION_SECONDS`, `WORKSPACE_ROOT`, `KEEP_WORKSPACES`, `ARTIFACT_ROOT` |
 | Messaging | `CONSUMER_MAX_ATTEMPTS`, `CONSUMER_RETRY_DELAY_MS` |
 | HTTP connector | `MCP_HTTP_ALLOWED_HOSTS`, `MCP_HTTP_ALLOW_PRIVATE_IPS`, `MCP_HTTP_TIMEOUT_MS`, `MCP_HTTP_MAX_RESPONSE_BYTES` |
 

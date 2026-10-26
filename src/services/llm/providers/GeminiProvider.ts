@@ -2,7 +2,7 @@ import axios from "axios";
 import { config } from "../../../config";
 import { LLMOutputError } from "../errors";
 import { groupMessages, replayable } from "../toolMessages";
-import { LLMProvider, Model, ToolRequest, ToolTurn, UsageStats } from "../types";
+import { LLMProvider, Model, TextResult, ToolRequest, ToolTurn, UsageStats } from "../types";
 
 // environment variable: GEMINI_API_KEY
 
@@ -64,7 +64,7 @@ export class GeminiProvider implements LLMProvider {
     model: string,
     prompt: { system?: string; user: string },
     apiKey?: string,
-  ): Promise<string> {
+  ): Promise<TextResult> {
     const key = apiKey || this.apiKey;
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
     const payload: Record<string, unknown> = {
@@ -88,6 +88,11 @@ export class GeminiProvider implements LLMProvider {
         finishReason?: string;
         content?: { parts?: Array<{ text?: string }> };
       }>;
+      usageMetadata?: {
+        promptTokenCount?: number;
+        candidatesTokenCount?: number;
+        thoughtsTokenCount?: number;
+      };
     };
     if (data.promptFeedback?.blockReason)
       throw new LLMOutputError(
@@ -109,7 +114,16 @@ export class GeminiProvider implements LLMProvider {
       .map((part) => part.text ?? "")
       .join("");
     if (!text.trim()) throw new LLMOutputError("Gemini", "empty response");
-    return text;
+    const usage = data.usageMetadata;
+    return {
+      text,
+      usage: {
+        inputTokens: usage?.promptTokenCount ?? 0,
+        // Thinking tokens are billed as output.
+        outputTokens:
+          (usage?.candidatesTokenCount ?? 0) + (usage?.thoughtsTokenCount ?? 0),
+      },
+    };
   }
 
   async generateWithTools(

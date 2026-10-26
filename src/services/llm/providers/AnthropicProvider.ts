@@ -2,7 +2,7 @@ import axios from "axios";
 import { config } from "../../../config";
 import { LLMOutputError } from "../errors";
 import { groupMessages, replayable } from "../toolMessages";
-import { LLMProvider, Model, ToolRequest, ToolTurn, UsageStats } from "../types";
+import { LLMProvider, Model, TextResult, ToolRequest, ToolTurn, UsageStats } from "../types";
 
 interface AnthropicModel {
   id: string;
@@ -42,7 +42,7 @@ export class AnthropicProvider implements LLMProvider {
     model: string,
     prompt: { system?: string; user: string },
     apiKey?: string,
-  ): Promise<string> {
+  ): Promise<TextResult> {
     const key = apiKey || this.apiKey;
     const url = "https://api.anthropic.com/v1/messages";
     const payload: Record<string, unknown> = {
@@ -66,6 +66,7 @@ export class AnthropicProvider implements LLMProvider {
     const data = response.data as {
       stop_reason?: string;
       content?: Array<{ type: string; text?: string }>;
+      usage?: { input_tokens?: number; output_tokens?: number };
     };
     if (data.stop_reason === "max_tokens")
       throw new LLMOutputError("Anthropic", "truncated at max_tokens");
@@ -76,7 +77,13 @@ export class AnthropicProvider implements LLMProvider {
       .map((block) => block.text ?? "")
       .join("");
     if (!text.trim()) throw new LLMOutputError("Anthropic", "empty response");
-    return text;
+    return {
+      text,
+      usage: {
+        inputTokens: data.usage?.input_tokens ?? 0,
+        outputTokens: data.usage?.output_tokens ?? 0,
+      },
+    };
   }
 
   async generateWithTools(

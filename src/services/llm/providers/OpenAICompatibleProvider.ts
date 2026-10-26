@@ -1,7 +1,7 @@
 import axios from "axios";
 import { config } from "../../../config";
 import { LLMOutputError } from "../errors";
-import { LLMProvider, Model, ToolRequest, ToolTurn, UsageStats } from "../types";
+import { LLMProvider, Model, TextResult, ToolRequest, ToolTurn, UsageStats } from "../types";
 
 interface OpenAIModel {
   id: string;
@@ -87,7 +87,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
     model: string,
     prompt: { system?: string; user: string },
     apiKey?: string,
-  ): Promise<string> {
+  ): Promise<TextResult> {
     const { label } = this.profile;
     const messages: Array<{ role: "system" | "user"; content: string }> = [];
     if (prompt.system) {
@@ -115,7 +115,16 @@ export class OpenAICompatibleProvider implements LLMProvider {
       throw new LLMOutputError(label, "blocked by content filter");
     const text = choice?.message?.content ?? "";
     if (!text.trim()) throw new LLMOutputError(label, "empty response");
-    return text;
+    const usage = response.data.usage as
+      | { prompt_tokens?: number; completion_tokens?: number }
+      | undefined;
+    return {
+      text,
+      usage: {
+        inputTokens: usage?.prompt_tokens ?? 0,
+        outputTokens: usage?.completion_tokens ?? 0,
+      },
+    };
   }
 
   async generateWithTools(

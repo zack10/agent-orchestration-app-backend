@@ -83,7 +83,7 @@ test("the default provider must be configured", () => {
 
 test("two profiles route to their own base URLs and keys; an agent key wins over the profile's", async (t) => {
   const calls = capturePosts(t);
-  const llm = new LLMService(new ProviderRegistry(parse([groq, mistral]), "gemini", "gemini-flash-latest"));
+  const llm = new LLMService(new ProviderRegistry(parse([groq, mistral]), "gemini", "gemini-flash-latest"), null);
 
   assert.equal(await llm.generateContent("groq", "llama", { system: "sys", user: "hi" }), "ok");
   await llm.generateContent("mistral", "mistral-small", { user: "hi" });
@@ -107,13 +107,14 @@ test("a keyless profile sends no Authorization header", async (t) => {
   const calls = capturePosts(t);
   const llm = new LLMService(
     new ProviderRegistry(parse([{ key: "ollama", baseUrl: "http://localhost:11434/v1" }]), "ollama", "llama3"),
+    null,
   );
   await llm.generateContent("ollama", "llama3", { user: "hi" });
   assert.equal(calls[0].headers.Authorization, undefined);
 });
 
 test("resolveModel applies the default provider and model, and rejects incomplete agents", () => {
-  const llm = new LLMService(new ProviderRegistry(parse([groq]), "groq", "llama-3.3-70b"));
+  const llm = new LLMService(new ProviderRegistry(parse([groq]), "groq", "llama-3.3-70b"), null);
   assert.deepEqual(llm.resolveModel({}), { provider: "groq", model: "llama-3.3-70b" });
   assert.deepEqual(llm.resolveModel({ provider: "openai", model: "gpt-4o" }), { provider: "openai", model: "gpt-4o" });
   assert.throws(() => llm.resolveModel({ provider: "openai" }), /has no model set/);
