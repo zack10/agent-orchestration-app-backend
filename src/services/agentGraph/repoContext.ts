@@ -8,6 +8,8 @@ export interface RepoContext {
   selectedFiles: string[];
   selectedFileContents: Array<{ path: string; content: string }>;
   summary: string;
+  /** The summary without file contents, for agents that read files with tools. */
+  overview: string;
 }
 
 const EXCLUDED_DIRS = new Set([
@@ -123,7 +125,16 @@ const readSelectedFiles = async (root: string, files: string[]) => {
   return contents;
 };
 
-const formatSummary = (context: Omit<RepoContext, "summary">) => {
+type CollectedContext = Omit<RepoContext, "summary" | "overview">;
+
+const formatOverview = (context: CollectedContext) =>
+  [
+    `Repository file tree sample:\n${context.fileTree.join("\n")}`,
+    `Package scripts: ${context.packageScripts.join(", ") || "none detected"}`,
+    `Files that look relevant to the ticket: ${context.selectedFiles.join(", ") || "none found"}`,
+  ].join("\n\n");
+
+const formatSummary = (context: CollectedContext) => {
   const selected = context.selectedFileContents
     .map(
       // Not the "FILE:" output syntax, so models don't echo it back unfenced.
@@ -151,5 +162,9 @@ export const collectRepoContext = async (root: string, ticket: string) => {
     selectedFiles,
     selectedFileContents,
   };
-  return { ...partial, summary: formatSummary(partial) };
+  return {
+    ...partial,
+    summary: formatSummary(partial),
+    overview: formatOverview(partial),
+  };
 };

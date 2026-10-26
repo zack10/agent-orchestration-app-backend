@@ -431,8 +431,10 @@ const agentLoop = async (state: GraphState) => {
   const prompt = renderExecutionPrompt("agent", {
     ticket,
     internalPlan: state.internalPlan || "No internal plan was produced.",
-    repoContext:
-      state.repoContext?.summary ?? "No repository context was collected.",
+    // File list only: the agent reads what it needs, instead of every step
+    // re-sending the selected files' contents.
+    repoOverview:
+      state.repoContext?.overview ?? "No repository overview was collected.",
     lastFailure: state.lastFailure || "None",
     checkScripts: ctx.checkScripts.join(", ") || "none",
   });

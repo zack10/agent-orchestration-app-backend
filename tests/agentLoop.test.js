@@ -2,7 +2,11 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const { compactMessages, runAgentLoop } = require("../dist/services/agentGraph/agentLoop");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { renderExecutionPrompt } = require("../dist/prompts");
+const { collectRepoContext } = require("../dist/services/agentGraph/repoContext");
 
 /** A model that replies with the scripted turns in order and records each request. */
 const scriptedModel = (turns, usage = { inputTokens: 100, outputTokens: 10 }) => {
@@ -159,13 +163,28 @@ test("the agent prompt lists the checks and keeps ticket text out of the system 
   const prompt = renderExecutionPrompt("agent", {
     ticket: "Fix total\nRounding is off",
     internalPlan: "plan",
-    repoContext: "--- a.js ---",
+    repoOverview: "Repository file tree sample:\nsrc/a.js",
     lastFailure: "None",
     checkScripts: "lint, test",
   });
-  assert.equal(prompt.version, "agent.v1");
+  assert.equal(prompt.version, "agent.v2");
+  assert.match(prompt.user, /Repository overview:\nRepository file tree sample/);
   assert.match(prompt.system, /run_check \(lint, test\)/);
   assert.match(prompt.system, /status "blocked"/);
   assert.match(prompt.user, /Rounding is off/);
   assert.doesNotMatch(prompt.system, /Rounding is off/);
+});
+
+test("the repository overview lists relevant files without their contents", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "repo-overview-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, "src"));
+  fs.writeFileSync(path.join(root, "src/pagination.js"), "const SECRET_BODY = 1;\n");
+  fs.writeFileSync(path.join(root, "package.json"), '{ "scripts": { "test": "node --test" } }');
+
+  const context = await collectRepoContext(root, "paginate skips the first page in pagination.js");
+  assert.match(context.summary, /SECRET_BODY/, "single-shot mode still gets the contents");
+  assert.doesNotMatch(context.overview, /SECRET_BODY/);
+  assert.match(context.overview, /Files that look relevant to the ticket: .*src\/pagination\.js/);
+  assert.match(context.overview, /Package scripts: test/);
 });
