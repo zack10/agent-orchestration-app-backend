@@ -129,6 +129,18 @@ test("selected checks that the repository lacks are unavailable, not failed", ()
   assert.deepEqual(selected.unavailable, ["lint"]);
 });
 
+test("the agent is told the image and each check's command, or how to find them", () => {
+  const { describeEnvironment } = require("../dist/services/toolchain");
+  const { toolchain } = resolve({}, { toolchain: { image: "python:3.12", language: "Python", checks: { test: ["pytest", "-q"] } } });
+  assert.equal(
+    describeEnvironment(toolchain, selectChecks(toolchain, {}).run, true),
+    "Language: Python\nImage: python:3.12\nChecks:\n- test: pytest -q",
+  );
+  const bare = resolve({}).toolchain;
+  assert.match(describeEnvironment(bare, [], true), /none are configured.*use run_command/);
+  assert.doesNotMatch(describeEnvironment(bare, [], false), /run_command/, "single-shot mode has no commands");
+});
+
 test("the PR body says which checks ran, and when none did", () => {
   const { describeVerification } = require("../dist/services/workspaceService");
   const verified = describeVerification({

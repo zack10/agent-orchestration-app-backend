@@ -25,7 +25,10 @@ const workspace = (t, overrides = {}) => {
     fs.writeFileSync(path.join(root, file), content);
   }
   const checks = [];
+  const commands = [];
   const { toolchain } = resolveToolchain(fsRepoFiles(root), {});
+  // Tracked at the base commit: everything but node_modules and .git.
+  const baseFiles = new Set(Object.keys(files).filter((file) => !/^(node_modules|\.git)\//.test(file)));
   const ctx = {
     root,
     protectedPaths: ["package.json", "package-lock.json", ".github"],
@@ -34,11 +37,15 @@ const workspace = (t, overrides = {}) => {
       checks.push(check);
       return { exitCode: 1, timedOut: false, output: "1 failing: expected 3, got -1" };
     },
+    runCommand: async (command, timeoutMs) => {
+      commands.push({ command, timeoutMs });
+      return { exitCode: 0, timedOut: false, output: "ok" };
+    },
     isTestFile: (file) => isTestFile(toolchain, file),
-    createdFiles: new Set(),
+    isBaseFile: (file) => baseFiles.has(file),
     ...overrides,
   };
-  return { root, ctx, checks };
+  return { root, ctx, checks, commands };
 };
 
 const run = (ctx, name, args) => executeTool(ctx, name, args);
@@ -46,7 +53,7 @@ const run = (ctx, name, args) => executeTool(ctx, name, args);
 test("every tool definition has a name, description and object schema", () => {
   assert.deepEqual(
     SANDBOX_TOOLS.map((tool) => tool.name),
-    ["list_files", "read_file", "search_code", "edit_file", "run_check", "finish"],
+    ["list_files", "read_file", "search_code", "edit_file", "run_check", "run_command", "finish"],
   );
   for (const tool of SANDBOX_TOOLS) {
     assert.ok(tool.description.length > 20, tool.name);
@@ -161,6 +168,36 @@ test("run_check runs only available checks and keeps the end of long output", as
 
   ctx.runCheck = async () => ({ exitCode: 137, timedOut: true, output: "" });
   assert.match((await run(ctx, "run_check", { check: "test" })).output, /TIMED OUT/);
+});
+
+test("a test file a command created is new, so the agent may edit it", async (t) => {
+  const { root, ctx } = workspace(t);
+  // As if `run_command` had generated it: it exists but is not in the base commit.
+  fs.writeFileSync(path.join(root, "tests/generated.test.js"), "// generated\n");
+  const edited = await run(ctx, "edit_file", { path: "tests/generated.test.js", oldText: "// generated", newText: "// edited" });
+  assert.equal(edited.status, "COMPLETED");
+});
+
+test("run_command runs a shell command with a capped time limit and shows the end of its output", async (t) => {
+  const { ctx, commands } = workspace(t);
+  const ok = await run(ctx, "run_command", { command: "make test ONLY=math" });
+  assert.equal(ok.status, "COMPLETED");
+  assert.equal(ok.output, "$ make test ONLY=math\nPASSED\nok");
+  assert.deepEqual(commands, [{ command: "make test ONLY=math", timeoutMs: 300_000 }]);
+
+  await run(ctx, "run_command", { command: "sleep 1", timeoutSeconds: 5 });
+  assert.equal(commands[1].timeoutMs, 5000);
+  assert.match((await run(ctx, "run_command", { command: "x", timeoutSeconds: 301 })).output, /Invalid arguments for run_command: timeoutSeconds/);
+  assert.match((await run(ctx, "run_command", { command: "" })).output, /Invalid arguments for run_command: command/);
+
+  ctx.runCommand = async () => ({ exitCode: 2, timedOut: false, output: `${"y".repeat(30_000)}\nerror: LAST` });
+  const failing = await run(ctx, "run_command", { command: "build" });
+  assert.equal(failing.status, "COMPLETED", "a failing command is information, not a tool failure");
+  assert.match(failing.output, /^\[output truncated/);
+  assert.match(failing.output, /error: LAST$/);
+
+  ctx.runCommand = async () => ({ exitCode: 137, timedOut: true, output: "" });
+  assert.match((await run(ctx, "run_command", { command: "loop", timeoutSeconds: 2 })).output, /TIMED OUT after 2s/);
 });
 
 test("finish reports the agent's verdict; unknown tools and bad arguments are results", async (t) => {

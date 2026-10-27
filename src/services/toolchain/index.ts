@@ -142,6 +142,24 @@ export const selectChecks = (toolchain: Toolchain, rawConfig: unknown) => {
 export const isTestFile = (toolchain: Toolchain, file: string) =>
   toolchain.testFilePatterns.some((pattern) => new RegExp(pattern).test(file));
 
+/** What the agent is told about the environment: where commands run and what checks the change. */
+export const describeEnvironment = (
+  toolchain: Toolchain,
+  checks: Array<{ name: string; command: string[] }>,
+  canRunCommands: boolean,
+) =>
+  [
+    ...(toolchain.language ? [`Language: ${toolchain.language}`] : []),
+    `Image: ${toolchain.image}`,
+    checks.length
+      ? `Checks:\n${checks.map((check) => `- ${check.name}: ${check.command.join(" ")}`).join("\n")}`
+      : `Checks: none are configured for this repository.${
+          canRunCommands
+            ? " Find out how it is built and tested from its own files (README, build files, CI configuration) and use run_command to do that."
+            : ""
+        }`,
+  ].join("\n");
+
 /** A one-line description for prompts and events. */
 export const describeToolchain = (toolchain: Toolchain) => {
   const checks = Object.keys(toolchain.checks);

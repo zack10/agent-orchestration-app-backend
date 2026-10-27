@@ -27,8 +27,10 @@ import {
 } from "../sandbox/toolRunner";
 import {
   changedFiles,
+  changes,
   cloneGithubWorkspace,
   gitDiff,
+  prepareVerification,
   setupWorkspace,
   removeWorkspace,
   resetWorkspace,
@@ -39,7 +41,9 @@ import {
 } from "../workspaceService";
 import {
   Toolchain,
+  describeEnvironment,
   describeToolchain,
+  isTestFile,
   fsRepoFiles,
   resolveToolchain,
   selectChecks,
@@ -48,7 +52,7 @@ import { AgentStopReason, runAgentLoop } from "./agentLoop";
 import { reviewDiffSafety } from "./diffReview";
 import { fileActionsError } from "./outputFormat";
 import { RepoContext, collectRepoContext } from "./repoContext";
-import { RepositoryPolicy, checkRepositoryPolicy } from "./repoPolicy";
+import { RepositoryPolicy, checkExistingTests, checkRepositoryPolicy } from "./repoPolicy";
 
 const llm = new LLMService();
 const MAX_ATTEMPTS = 3;
@@ -77,6 +81,10 @@ const ExecutionGraphState = Annotation.Root({
   repoContext: Annotation<RepoContext | undefined>(),
   // How the repository is installed and checked, resolved after cloning.
   toolchain: Annotation<Toolchain | undefined>(),
+  // What setup installed inside the workspace, restored before verification.
+  setupOutputs: Annotation<string[]>({ reducer: (_old, value) => value, default: () => [] }),
+  // The environment as the prompts describe it (image, checks and their commands).
+  environment: Annotation<string | undefined>(),
   internalPlan: Annotation<string>({
     reducer: (_current, update) => update,
     default: () => "",
@@ -278,7 +286,7 @@ const loadExecutionContext = async (
     checks: Object.keys(resolution.toolchain.checks),
   });
   // Later commands run in the snapshot taken after setup and the baseline checks.
-  const { image, baseline } = await setupWorkspace(
+  const { image, baseline, setupOutputs } = await setupWorkspace(
     execution.id,
     resolution.toolchain,
     selectChecks(resolution.toolchain, execution.repository.verificationConfig).run,
@@ -333,6 +341,12 @@ const loadExecutionContext = async (
     maxTokens,
     deadline,
     toolchain,
+    setupOutputs,
+    environment: describeEnvironment(
+      toolchain,
+      selectChecks(toolchain, execution.repository.verificationConfig).run,
+      agentMode === "tool_loop",
+    ),
   };
 };
 
@@ -362,6 +376,7 @@ const planChange = async (state: typeof ExecutionGraphState.State) => {
   }
   const prompt = renderExecutionPrompt("plan", {
     ticket: state.ticket,
+    environment: state.environment ?? "Unknown.",
     repoContext: state.repoContext.summary,
   });
   const raw = await askAgent(state, prompt);
@@ -411,6 +426,7 @@ const implementChange = async (state: GraphState) => {
     state,
     renderExecutionPrompt("implement", {
       ticket,
+      environment: state.environment ?? "Unknown.",
       internalPlan: state.internalPlan || "No internal plan was produced.",
       repoContext:
         state.repoContext?.summary ?? "No repository context was collected.",
@@ -487,7 +503,7 @@ const agentLoop = async (state: GraphState) => {
     include: { repository: true },
   });
   const toolchain = requireToolchain(state);
-  const ctx = executionToolContext(state.executionId, execution.repository, toolchain);
+  const ctx = await executionToolContext(state.executionId, execution.repository, toolchain);
   const recorder = prismaToolCallRecorder(attempt.id);
   const prompt = renderExecutionPrompt("agent", {
     ticket,
@@ -497,7 +513,7 @@ const agentLoop = async (state: GraphState) => {
     repoOverview:
       state.repoContext?.overview ?? "No repository overview was collected.",
     lastFailure: state.lastFailure || "None",
-    checkScripts: ctx.checkScripts.join(", ") || "none",
+    environment: state.environment ?? "Unknown.",
   });
 
   // The loop gets what is left of the execution's budget after planning
@@ -587,12 +603,15 @@ const enforceRepositoryPolicy = async (
     where: { id: state.executionId },
     include: { repository: true },
   });
-  const files = await changedFiles(state.executionId);
-  const violation = checkRepositoryPolicy(
-    files,
-    execution.repository.executionPolicy as RepositoryPolicy | null,
-    requireToolchain(state).protectedPaths,
-  );
+  const toolchain = requireToolchain(state);
+  const diff = await changes(state.executionId);
+  const files = diff.map((change) => change.file);
+  const violation =
+    checkRepositoryPolicy(
+      files,
+      execution.repository.executionPolicy as RepositoryPolicy | null,
+      toolchain.protectedPaths,
+    ) ?? checkExistingTests(diff, (file) => isTestFile(toolchain, file));
 
   if (violation) {
     if (!state.attemptId) throw new Error("Execution graph is missing attempt");
@@ -628,6 +647,8 @@ const verifyChange = async (state: typeof ExecutionGraphState.State) => {
     data: { status: "VERIFYING" },
   });
   const toolchain = requireToolchain(state);
+  // Checks judge only the diff: nothing hidden from it may influence them.
+  await prepareVerification(state.executionId, toolchain.image, state.setupOutputs);
   const verification = await verifyWorkspace(
     state.executionId,
     toolchain,

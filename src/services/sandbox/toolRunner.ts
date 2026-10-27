@@ -3,7 +3,7 @@ import prisma from "../../db";
 import { RepositoryPolicy } from "../agentGraph/repoPolicy";
 import { ToolCall } from "../llm/types";
 import { Toolchain, isTestFile, selectChecks } from "../toolchain";
-import { execInSandbox, keepOutputOutOfDiffs, workspacePath } from "../workspaceService";
+import { execInSandbox, keepOutputOutOfDiffs, trackedFiles, workspacePath } from "../workspaceService";
 import { CHECK_TIMEOUT_MS, ToolContext, ToolOutcome, ToolStatus, executeTool } from "./tools";
 
 // Stored output is capped; the full output already went to the model.
@@ -73,13 +73,14 @@ export const runRecordedTool = async (
 };
 
 /** The tool context for an execution, from its repository's settings and toolchain. */
-export const executionToolContext = (
+export const executionToolContext = async (
   executionId: string,
   repository: { executionPolicy: unknown; verificationConfig: unknown },
   toolchain: Toolchain,
-): ToolContext => {
+): Promise<ToolContext> => {
   const policy = repository.executionPolicy as RepositoryPolicy | null;
   const checks = selectChecks(toolchain, repository.verificationConfig).run;
+  const baseFiles = new Set(await trackedFiles(executionId));
   return {
     root: workspacePath(executionId),
     protectedPaths: policy?.protectedPaths ?? toolchain.protectedPaths,
@@ -90,7 +91,9 @@ export const executionToolContext = (
       // What the check writes (build output, caches) is not the agent's change.
       return keepOutputOutOfDiffs(executionId, () => execInSandbox(executionId, check.command, CHECK_TIMEOUT_MS));
     },
+    // What the agent's commands write is its change: visible in the diff and policed there.
+    runCommand: (command, timeoutMs) => execInSandbox(executionId, ["sh", "-c", command], timeoutMs),
     isTestFile: (file) => isTestFile(toolchain, file),
-    createdFiles: new Set(),
+    isBaseFile: (file) => baseFiles.has(file),
   };
 };

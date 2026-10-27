@@ -13,6 +13,7 @@ const {
   collectRepoContext,
 } = require("../dist/services/agentGraph/repoContext");
 const {
+  checkExistingTests,
   checkRepositoryPolicy,
 } = require("../dist/services/agentGraph/repoPolicy");
 const {
@@ -145,4 +146,29 @@ test("implement replies without usable FILE blocks are rejected with a specific 
 
   const good = JSON.stringify({ actions: "FILE: src/a.js\n```js\nmodule.exports = 1;\n```" });
   assert.equal(check(good), undefined);
+});
+
+test("existing tests may not be modified or deleted by any means; new tests may be added", () => {
+  const isTest = (file) => file.startsWith("tests/");
+  assert.equal(
+    checkExistingTests(
+      [
+        { status: "M", file: "src/a.py" },
+        { status: "A", file: "tests/test_new.py" },
+        { status: "D", file: "src/old.py" },
+      ],
+      isTest,
+    ),
+    undefined,
+  );
+  const violation = checkExistingTests(
+    [
+      { status: "M", file: "tests/test_a.py" },
+      { status: "D", file: "tests/test_b.py" },
+      { status: "T", file: "tests/test_c.py" },
+    ],
+    isTest,
+  );
+  assert.match(violation, /tests\/test_a\.py \(modified\), tests\/test_b\.py \(deleted\), tests\/test_c\.py \(modified\)/);
+  assert.match(violation, /add new test files instead/);
 });

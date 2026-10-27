@@ -104,6 +104,14 @@ const variables = {
   },
 };
 
+// The current versions also get the repository environment.
+const ENVIRONMENT = "Image: example/image:1\nChecks:\n- test: make test";
+const current = {
+  ...variables,
+  plan: { ...variables.plan, environment: ENVIRONMENT },
+  implement: { ...variables.implement, environment: ENVIRONMENT },
+};
+
 const lines = (text) =>
   text
     .split("\n")
@@ -128,8 +136,9 @@ for (const name of Object.keys(legacy)) {
 }
 
 test("ticket details go to the user prompt, fixed instructions to the system prompt", () => {
-  const prompt = renderExecutionPrompt("implement", variables.implement);
+  const prompt = renderExecutionPrompt("implement", current.implement);
   assert.match(prompt.user, /Rounding is off/);
+  assert.match(prompt.user, /Repository environment:\nImage: example\/image:1/);
   assert.doesNotMatch(prompt.system, /Rounding is off/);
   assert.match(prompt.system, /FILE: relative\/path/);
   assert.doesNotMatch(prompt.system, /\{\{/);
@@ -159,6 +168,7 @@ test("an unused variable fails loudly (catches typos in variable names)", () => 
 test("values are inserted as-is, never expanded again", () => {
   const prompt = renderExecutionPrompt("plan", {
     ticket: "Literal {{repoContext}} and $& in the ticket",
+    environment: ENVIRONMENT,
     repoContext: "context",
   });
   assert.match(prompt.user, /Literal \{\{repoContext\}\} and \$& in the ticket/);
@@ -172,13 +182,32 @@ test("unknown or unsafe prompt versions are refused", () => {
 test("plan.v2 and review.v2 extend v1 with the new-test-file rule and change nothing else", () => {
   for (const name of ["plan", "review"]) {
     const v1 = renderPromptVersion(`${name}.v1`, variables[name]);
-    const v2 = renderExecutionPrompt(name, variables[name]);
+    const v2 = renderPromptVersion(`${name}.v2`, variables[name]);
     assert.equal(v2.version, `${name}.v2`);
     assert.equal(v2.user, v1.user);
     const added = lines(v2.system).filter((line) => !lines(v1.system).includes(line));
     assert.equal(added.length, 1, `${name}.v2 adds one paragraph`);
     assert.deepEqual(lines(v1.system).filter((line) => !lines(v2.system).includes(line)), [], "nothing removed");
   }
-  assert.match(renderExecutionPrompt("plan", variables.plan).system, /Existing test files must not be changed.*new test file/);
+  assert.match(renderPromptVersion("plan.v2", variables.plan).system, /Existing test files must not be changed.*new test file/);
   assert.match(renderExecutionPrompt("review", variables.review).system, /guidance, not a contract.*A new test file for the fix is expected/);
+});
+
+test("the prompts in use name no language, package manager or file type", () => {
+  // Only the templates are checked, so every variable is a neutral value.
+  const neutral = (names) => Object.fromEntries(names.map((name) => [name, "x"]));
+  const rendered = [
+    ...["plan", "implement", "analyze", "review"].map((name) =>
+      renderExecutionPrompt(name, neutral(Object.keys(current[name]))),
+    ),
+    renderExecutionPrompt("agent", neutral(["ticket", "environment", "internalPlan", "repoOverview", "lastFailure"])),
+  ];
+  for (const prompt of rendered) {
+    const text = `${prompt.system}\n${prompt.user}`;
+    assert.doesNotMatch(text, /Node|TypeScript|JavaScript|npm|\.(js|ts)\b/, prompt.version);
+  }
+  assert.deepEqual(
+    rendered.map((prompt) => prompt.version),
+    ["plan.v3", "implement.v2", "analyze.v1", "review.v2", "agent.v3"],
+  );
 });

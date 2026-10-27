@@ -159,17 +159,18 @@ test("old tool output is shortened, recent output and pairing are kept", () => {
   assert.equal(messages[2].content, long("file0"), "the input is not modified");
 });
 
-test("the agent prompt lists the checks and keeps ticket text out of the system prompt", () => {
+test("the agent prompt gets the environment and keeps ticket text out of the system prompt", () => {
   const prompt = renderExecutionPrompt("agent", {
     ticket: "Fix total\nRounding is off",
+    environment: "Image: example/image:1\nChecks:\n- test: make test",
     internalPlan: "plan",
     repoOverview: "Repository file tree sample:\nsrc/a.js",
     lastFailure: "None",
-    checkScripts: "lint, test",
   });
-  assert.equal(prompt.version, "agent.v2");
+  assert.equal(prompt.version, "agent.v3");
   assert.match(prompt.user, /Repository overview:\nRepository file tree sample/);
-  assert.match(prompt.system, /run_check \(lint, test\)/);
+  assert.match(prompt.user, /Repository environment:\nImage: example\/image:1\nChecks:\n- test: make test/);
+  assert.match(prompt.system, /run_command/);
   assert.match(prompt.system, /status "blocked"/);
   assert.match(prompt.user, /Rounding is off/);
   assert.doesNotMatch(prompt.system, /Rounding is off/);

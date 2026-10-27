@@ -44,3 +44,20 @@ export const checkRepositoryPolicy = (
     ? `Repository policy rejected the change. ${issues.join(" ")}`
     : undefined;
 };
+
+/**
+ * Existing tests define what "working" means, so the change may add tests
+ * but not modify or delete ones that exist at the base commit. Checked on
+ * the final diff, because the agent can change files with commands as well
+ * as with edit_file.
+ */
+export const checkExistingTests = (
+  changes: Array<{ status: string; file: string }>,
+  isTestFile: (file: string) => boolean,
+): string | undefined => {
+  const touched = changes.filter((change) => change.status !== "A" && isTestFile(change.file));
+  if (!touched.length) return undefined;
+  const describe = (change: { status: string; file: string }) =>
+    `${change.file} (${change.status === "D" ? "deleted" : "modified"})`;
+  return `Repository policy rejected the change. Existing test files must not be changed or deleted: ${touched.map(describe).join(", ")}. Restore them and add new test files instead.`;
+};

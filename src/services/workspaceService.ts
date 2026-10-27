@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -86,12 +87,25 @@ const dockerArgs = (
   // `-e NAME` without a value makes docker read it from our process env.
   ...(withToken ? ["-e", "GITHUB_TOKEN"] : []),
   ...envArgs(options.env),
-  "-v",
-  `${root}:${SANDBOX_ROOT}`,
+  ...workspaceMounts(root, !options.image),
   "-w",
   SANDBOX_ROOT,
   options.image ?? GIT_IMAGE,
   ...command,
+];
+
+/**
+ * The repository's own commands (checks, the agent's commands) see .git
+ * read-only: through it they could hide changes from the diff that is
+ * reviewed and published (assume-unchanged, exclude entries, commits).
+ * Only our git operations, in the git image, may write it.
+ */
+const workspaceMounts = (root: string, writableGit: boolean) => [
+  "-v",
+  `${root}:${SANDBOX_ROOT}`,
+  ...(writableGit || !existsSync(path.join(root, ".git"))
+    ? []
+    : ["-v", `${path.join(root, ".git")}:${SANDBOX_ROOT}/.git:ro`]),
 ];
 
 /**
@@ -161,14 +175,19 @@ export const cloneGithubWorkspace = async (
 };
 
 /** Untracked files git doesn't ignore; `directories` collapses whole new folders. */
-const untrackedFiles = async (id: string, directories = false) =>
+const untrackedFiles = async (
+  id: string,
+  directories = false,
+  which: "visible" | "ignored" | "all" = "visible",
+) =>
   (
     await runDocker(id, [
       ...SAFE_GIT_ARGS,
       "ls-files",
       "-z",
       "--others",
-      "--exclude-standard",
+      ...(which === "all" ? [] : ["--exclude-standard"]),
+      ...(which === "ignored" ? ["--ignored"] : []),
       ...(directories ? ["--directory"] : []),
     ])
   ).stdout
@@ -230,7 +249,10 @@ export interface BaselineResult {
  * Tools install to different places (~/.m2, ~/.cache, /usr/local), so the
  * container is then snapshotted with `docker commit` instead of knowing any
  * of them; the workspace is a bind mount, so it is not in the snapshot.
- * Whatever this created inside the workspace is excluded from diffs.
+ * What setup installed inside the workspace (node_modules, .venv, vendor)
+ * is copied into the snapshot too, so verification can restore it exactly
+ * (see prepareVerification). Whatever this created inside the workspace is
+ * excluded from diffs.
  */
 export const setupWorkspace = async (
   id: string,
@@ -238,7 +260,8 @@ export const setupWorkspace = async (
   checks: Array<{ name: string; command: string[] }>,
 ) => {
   const baseline: BaselineResult[] = [];
-  if (!toolchain.setup && !checks.length) return { image: toolchain.image, baseline };
+  let setupOutputs: string[] = [];
+  if (!toolchain.setup && !checks.length) return { image: toolchain.image, baseline, setupOutputs };
 
   await removeEnvironmentSnapshot(id);
   const args = dockerArgs(workspacePath(id), true, false, ["sleep", "infinity"], {
@@ -251,7 +274,13 @@ export const setupWorkspace = async (
     execDocker(["exec", setupContainer(id), ...command], undefined, SETUP_TIMEOUT_MS);
   try {
     await execDocker(args);
-    if (toolchain.setup) await run(toolchain.setup);
+    if (toolchain.setup) {
+      await run(toolchain.setup);
+      // A fresh clone has no untracked files: these all came from setup.
+      setupOutputs = (await untrackedFiles(id, true, "all")).map((entry) => entry.replace(/\/$/, ""));
+      if (setupOutputs.length)
+        await run(["sh", "-c", COPY_ENTRIES, "sh", SANDBOX_ROOT, SETUP_COPY_DIR, ...setupOutputs]);
+    }
     for (const { name, command } of checks)
       try {
         const result = await run(command);
@@ -265,7 +294,39 @@ export const setupWorkspace = async (
   }
   // A fresh clone has no untracked files, so everything here came from setup.
   await excludeFromDiffs(id, await untrackedFiles(id, true));
-  return { image: snapshotImage(id), baseline };
+  return { image: snapshotImage(id), baseline, setupOutputs };
+};
+
+// Inside the snapshot, outside the workspace: what setup installed there.
+const SETUP_COPY_DIR = "/opt/agent-setup-output";
+// sh -c COPY_ENTRIES sh <from> <to> <entry>...: replaces each entry under <to>
+// with a full copy of it from <from>, keeping modes and links.
+const COPY_ENTRIES =
+  'from=$1; to=$2; shift 2; for e in "$@"; do rm -rf "$to/$e" && mkdir -p "$(dirname "$to/$e")" && cp -a "$from/$e" "$to/$e" || exit 1; done';
+
+/**
+ * Makes the workspace hold only the change before the checks that judge it.
+ * Anything the agent or a check left that the diff doesn't show (ignored or
+ * excluded files: a conftest.py hidden from git, edited dependencies, build
+ * output) is deleted, and what setup installed is restored from the copy in
+ * the snapshot. So checks see exactly the base commit, the setup, and the
+ * diff that is reviewed and published.
+ */
+export const prepareVerification = async (id: string, image: string, setupOutputs: string[]) => {
+  const isSetupOutput = (entry: string) =>
+    setupOutputs.some((output) => entry === output || entry.startsWith(`${output}/`));
+  const leftovers = (await untrackedFiles(id, true, "ignored"))
+    .map((entry) => entry.replace(/\/$/, ""))
+    .filter((entry) => !isSetupOutput(entry));
+  if (leftovers.length) await runDocker(id, ["rm", "-rf", "--", ...leftovers]);
+  if (setupOutputs.length)
+    await execDocker(
+      dockerArgs(workspacePath(id), false, false, ["sh", "-c", COPY_ENTRIES, "sh", SETUP_COPY_DIR, SANDBOX_ROOT, ...setupOutputs], {
+        image,
+      }),
+      undefined,
+      SETUP_TIMEOUT_MS,
+    );
 };
 /**
  * Commands that return a clone to its checked-out commit: tracked changes,
@@ -291,15 +352,34 @@ export const gitDiff = async (id: string) => {
     ])
   ).stdout;
 };
-export const changedFiles = async (id: string) => {
+export const changedFiles = async (id: string) =>
+  (await changes(id)).map((change) => change.file);
+
+/** A changed file and how: A added, M modified, D deleted, T type changed. */
+export interface FileChange {
+  status: string;
+  file: string;
+}
+
+/** The change as the diff shows it; renames appear as a deletion and an addition. */
+export const changes = async (id: string): Promise<FileChange[]> => {
   await runDocker(id, [...SAFE_GIT_ARGS, "add", "-N", "."]);
-  return (
-    await runDocker(id, [...SAFE_GIT_ARGS, "diff", "--name-only", "--no-ext-diff"])
+  const fields = (
+    await runDocker(id, [...SAFE_GIT_ARGS, "diff", "--name-status", "--no-renames", "-z", "--no-ext-diff"])
   ).stdout
-    .split(/\r?\n/)
-    .map((value) => value.trim())
+    .split("\0")
     .filter(Boolean);
+  const result: FileChange[] = [];
+  for (let index = 0; index + 1 < fields.length; index += 2)
+    result.push({ status: fields[index], file: fields[index + 1] });
+  return result;
 };
+
+/** Files in the checked-out commit, whatever the index or working tree hold now. */
+export const trackedFiles = async (id: string) =>
+  (await runDocker(id, [...SAFE_GIT_ARGS, "ls-tree", "-r", "-z", "--name-only", "HEAD"])).stdout
+    .split("\0")
+    .filter(Boolean);
 
 /**
  * Publishes an approved diff from a fresh clone. The verification workspace
@@ -429,8 +509,7 @@ export const startSandbox = async (id: string, toolchain: Toolchain) => {
     "none",
     // `docker exec` inherits these, so every command sees the toolchain's caches.
     ...envArgs(toolchain.env),
-    "-v",
-    `${workspacePath(id)}:${SANDBOX_ROOT}`,
+    ...workspaceMounts(workspacePath(id), false),
     "-w",
     SANDBOX_ROOT,
     toolchain.image,

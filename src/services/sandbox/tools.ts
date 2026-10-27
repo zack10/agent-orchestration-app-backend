@@ -22,10 +22,12 @@ export interface ToolContext {
   checkScripts: string[];
   /** Runs the named check's command in the run's sandbox. */
   runCheck: (check: string) => Promise<SandboxResult>;
+  /** Runs a shell command in the run's sandbox (no network). */
+  runCommand: (command: string, timeoutMs: number) => Promise<SandboxResult>;
   /** Whether a repository-relative path is a test file, per the toolchain. */
   isTestFile: (file: string) => boolean;
-  /** Files created by the agent in this run; they are not "existing" tests. */
-  createdFiles: Set<string>;
+  /** Whether a file is tracked at the base commit; new files are not "existing" tests. */
+  isBaseFile: (file: string) => boolean;
 }
 
 export type ToolStatus = "COMPLETED" | "DENIED" | "FAILED";
@@ -45,6 +47,7 @@ const MAX_SEARCH_MATCHES = 100;
 const MAX_SEARCH_FILE_BYTES = 1_000_000;
 const MAX_MATCH_LINE_CHARS = 300;
 export const CHECK_TIMEOUT_MS = 300_000;
+const MAX_COMMAND_CHARS = 4000;
 // Dependencies, caches and build output of the common toolchains.
 const SKIPPED_DIRS = new Set([
   ".git",
@@ -122,6 +125,22 @@ export const SANDBOX_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: "run_command",
+    description:
+      "Run a shell command in the repository's sandbox and see its output and exit code: build, run tests or a single test, use the language's tools, inspect the environment. The working directory is the repository root; there is no network, and dependencies are already installed. Files the command changes are part of your change, and the same rules apply to them: existing test files and protected files must not change. .git is read-only.",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "Shell command (run with sh -c)" },
+        timeoutSeconds: {
+          type: "integer",
+          description: `Time limit in seconds; default and maximum ${CHECK_TIMEOUT_MS / 1000}`,
+        },
+      },
+      required: ["command"],
+    },
+  },
+  {
     name: "finish",
     description:
       'End the run. Use status "done" when the change is complete, or "blocked" when the ticket cannot or should not be done (unclear, impossible or unsafe); explain why in the summary.',
@@ -146,6 +165,10 @@ const ARGS = {
   search_code: z.object({ query: z.string().min(1), path: z.string().optional() }),
   edit_file: z.object({ path: z.string(), oldText: z.string(), newText: z.string() }),
   run_check: z.object({ check: z.string() }),
+  run_command: z.object({
+    command: z.string().min(1).max(MAX_COMMAND_CHARS),
+    timeoutSeconds: z.number().int().positive().max(CHECK_TIMEOUT_MS / 1000).optional(),
+  }),
   finish: z.object({ status: z.enum(["done", "blocked"]), summary: z.string().min(1) }),
 };
 
@@ -264,7 +287,7 @@ const editFile = (ctx: ToolContext, args: z.infer<typeof ARGS.edit_file>) => {
     return denied(`"${file}" is protected and cannot be changed. Protected: ${ctx.protectedPaths.join(", ")}.`);
   const exists = fs.existsSync(target.fullPath);
   if (exists && !fs.statSync(target.fullPath).isFile()) return failed(`"${file}" is not a file.`);
-  if (exists && ctx.isTestFile(file) && !ctx.createdFiles.has(file))
+  if (exists && ctx.isTestFile(file) && ctx.isBaseFile(file))
     return denied(`"${file}" is an existing test file and cannot be changed. Add new tests in a new file instead.`);
 
   let content: string;
@@ -289,7 +312,6 @@ const editFile = (ctx: ToolContext, args: z.infer<typeof ARGS.edit_file>) => {
 
   fs.mkdirSync(path.dirname(target.fullPath), { recursive: true });
   fs.writeFileSync(target.fullPath, content);
-  if (!exists) ctx.createdFiles.add(file);
   return completed(exists ? `Edited ${file}.` : `Created ${file}.`);
 };
 
@@ -297,12 +319,20 @@ const runCheck = async (ctx: ToolContext, args: z.infer<typeof ARGS.run_check>) 
   if (!ctx.checkScripts.includes(args.check))
     return denied(`"${args.check}" is not an available check. Available: ${ctx.checkScripts.join(", ") || "none"}.`);
   const result = await ctx.runCheck(args.check);
-  const verdict = result.timedOut
-    ? `TIMED OUT after ${CHECK_TIMEOUT_MS / 1000}s`
+  return completed(cap(`${args.check} check: ${verdict(result, CHECK_TIMEOUT_MS)}\n${result.output.trim()}`, "tail"));
+};
+
+const verdict = (result: SandboxResult, timeoutMs: number) =>
+  result.timedOut
+    ? `TIMED OUT after ${timeoutMs / 1000}s`
     : result.exitCode === 0
       ? "PASSED"
       : `FAILED (exit code ${result.exitCode})`;
-  return completed(cap(`${args.check} check: ${verdict}\n${result.output.trim()}`, "tail"));
+
+const runCommand = async (ctx: ToolContext, args: z.infer<typeof ARGS.run_command>) => {
+  const timeoutMs = (args.timeoutSeconds ?? CHECK_TIMEOUT_MS / 1000) * 1000;
+  const result = await ctx.runCommand(args.command, timeoutMs);
+  return completed(cap(`$ ${args.command}\n${verdict(result, timeoutMs)}\n${result.output.trim()}`, "tail"));
 };
 
 /** Runs one tool call. Unknown tools and invalid arguments are FAILED results. */
@@ -329,6 +359,8 @@ export const executeTool = async (
         return editFile(ctx, parsed.data as z.infer<typeof ARGS.edit_file>);
       case "run_check":
         return await runCheck(ctx, parsed.data as z.infer<typeof ARGS.run_check>);
+      case "run_command":
+        return await runCommand(ctx, parsed.data as z.infer<typeof ARGS.run_command>);
       default: {
         const args = parsed.data as z.infer<typeof ARGS.finish>;
         return { ...completed(`Finished (${args.status}).`), finish: args };
