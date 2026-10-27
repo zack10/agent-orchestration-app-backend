@@ -52,6 +52,12 @@ const MAX_NUDGES = 2;
 const NUDGE =
   "Continue by calling a tool. When the change is complete, or the ticket cannot or should not be done, call finish.";
 
+// Once this share of the step or token budget is used, the agent is told
+// once, so a finished change is not lost to a budget stop.
+const BUDGET_WARNING_SHARE = 0.8;
+const budgetWarning = (used: string) =>
+  `[Budget: ${used}. If the change is complete and its checks pass, call finish now; otherwise finish with what you have and say what is left.]`;
+
 // Tool results older than the most recent KEEP_RECENT_RESULTS are shortened
 // to a stub; the model can call the tool again if it needs them.
 const KEEP_RECENT_RESULTS = 8;
@@ -94,6 +100,7 @@ export const runAgentLoop = async (
   const usage = { inputTokens: 0, outputTokens: 0 };
   let steps = 0;
   let nudges = 0;
+  let warned = false;
   const result = (stopReason: AgentStopReason, summary: string): AgentLoopResult => ({
     stopReason,
     summary,
@@ -151,5 +158,15 @@ export const runAgentLoop = async (
     }
     await deps.onStep?.({ step: steps, text: turn.text, toolCalls: ran, usage: stepUsage });
     if (finish) return result(finish.status, finish.summary);
+
+    // The warning goes into the last tool result: a separate user message
+    // after tool results is not accepted by every provider.
+    const tokens = usage.inputTokens + usage.outputTokens;
+    if (!warned && (steps >= budget.maxSteps * BUDGET_WARNING_SHARE || tokens >= budget.maxTokens * BUDGET_WARNING_SHARE)) {
+      warned = true;
+      const last = messages[messages.length - 1];
+      if (last.role === "tool")
+        last.content += `\n\n${budgetWarning(`${steps} of ${budget.maxSteps} steps and ${tokens} of ${budget.maxTokens} tokens used`)}`;
+    }
   }
 };

@@ -111,6 +111,17 @@ test("the token budget counts input and output tokens", async () => {
   assert.deepEqual(result.usage, { inputTokens: 1200, outputTokens: 300 });
 });
 
+test("the agent is warned once when most of its budget is used", async () => {
+  // 500 tokens a step against 2400: the warning threshold (1920) is passed at step 4.
+  const model = scriptedModel([{ calls: [["list_files", {}]] }], { inputTokens: 400, outputTokens: 100 });
+  const result = await runAgentLoop(input({ budget: budget({ maxTokens: 2400 }) }), { ...model, ...fakeTools() });
+  assert.equal(result.stopReason, "max_tokens");
+  const results = model.requests.at(-1).messages.filter((m) => m.role === "tool").map((m) => m.content);
+  assert.deepEqual(results.slice(0, 3), ["list_files ok", "list_files ok", "list_files ok"]);
+  assert.match(results[3], /^list_files ok\n\n\[Budget: 4 of 10 steps and 2000 of 2400 tokens used\. .*call finish now/);
+  assert.equal(results.length, 4);
+});
+
 test("the time budget is checked before each model call", async () => {
   let clock = 0;
   const model = scriptedModel([{ calls: [["list_files", {}]] }]);
