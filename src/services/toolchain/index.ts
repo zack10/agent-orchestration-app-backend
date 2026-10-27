@@ -138,6 +138,10 @@ export const selectChecks = (toolchain: Toolchain, rawConfig: unknown) => {
   };
 };
 
+/** A command as a person would type it: `sh -c "<script>"` shows as the script. */
+export const commandText = (command: string[]) =>
+  command.length === 3 && command[0] === "sh" && command[1] === "-c" ? command[2] : command.join(" ");
+
 /** True for a file the toolchain treats as a test (repository-relative, "/" separators). */
 export const isTestFile = (toolchain: Toolchain, file: string) =>
   toolchain.testFilePatterns.some((pattern) => new RegExp(pattern).test(file));
@@ -152,7 +156,7 @@ export const describeEnvironment = (
     ...(toolchain.language ? [`Language: ${toolchain.language}`] : []),
     `Image: ${toolchain.image}`,
     checks.length
-      ? `Checks:\n${checks.map((check) => `- ${check.name}: ${check.command.join(" ")}`).join("\n")}`
+      ? `Checks:\n${checks.map((check) => `- ${check.name}: ${commandText(check.command)}`).join("\n")}`
       : `Checks: none are configured for this repository.${
           canRunCommands
             ? " Find out how it is built and tested from its own files (README, build files, CI configuration) and use run_command to do that."

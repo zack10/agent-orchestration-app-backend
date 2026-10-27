@@ -201,6 +201,7 @@ test("the prompts in use name no language, package manager or file type", () => 
       renderExecutionPrompt(name, neutral(Object.keys(current[name]))),
     ),
     renderExecutionPrompt("agent", neutral(["ticket", "environment", "internalPlan", "repoOverview", "lastFailure"])),
+    renderExecutionPrompt("discover", neutral(["fixed", "files", "lastAttempt"])),
   ];
   for (const prompt of rendered) {
     const text = `${prompt.system}\n${prompt.user}`;
@@ -208,6 +209,6 @@ test("the prompts in use name no language, package manager or file type", () => 
   }
   assert.deepEqual(
     rendered.map((prompt) => prompt.version),
-    ["plan.v3", "implement.v2", "analyze.v1", "review.v2", "agent.v3"],
+    ["plan.v3", "implement.v2", "analyze.v1", "review.v2", "agent.v3", "discover.v1"],
   );
 });

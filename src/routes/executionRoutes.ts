@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { approve, createIntegration, createPlan, createRepository, getExecution, updateRepository, getWorkItem, listExecutions, listIntegrations, listRepositories, listWorkItems, startExecution, syncIntegration } from '../controllers/executionController';
+import { approve, createIntegration, createPlan, createRepository, getExecution, updateRepository, approveEnvironment, getWorkItem, listExecutions, listIntegrations, listRepositories, listWorkItems, startExecution, syncIntegration } from '../controllers/executionController';
 import { validate } from '../middleware/validate';
 import { verificationConfigSchema } from '../services/toolchain';
 
@@ -9,6 +9,7 @@ const uuid = z.string().uuid();
 const executionPolicySchema = z.object({ maxChangedFiles: z.number().int().min(1).max(100).default(20), protectedPaths: z.array(z.string()).optional() });
 router.post('/repositories', validate(z.object({ body: z.object({ projectId: uuid, owner: z.string().regex(/^[a-zA-Z0-9_.-]+$/), name: z.string().regex(/^[a-zA-Z0-9_.-]+$/), defaultBranch: z.string().regex(/^[a-zA-Z0-9_./-]+$/).default('main'), githubInstallationId: z.string().min(1), verificationConfig: verificationConfigSchema.default({}), executionPolicy: executionPolicySchema.default({}) }) })), createRepository);
 router.patch('/repositories/:id', validate(z.object({ params: z.object({ id: uuid }), body: z.object({ verificationConfig: verificationConfigSchema.optional(), executionPolicy: executionPolicySchema.optional() }).strict().refine((body) => Object.keys(body).length > 0, 'nothing to update') })), updateRepository);
+router.post('/repositories/:id/environment/approve', validate(z.object({ params: z.object({ id: uuid }), body: z.object({ proposalHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict() })), approveEnvironment);
 router.get('/repositories', listRepositories);
 router.post('/integrations', validate(z.object({ body: z.object({ projectId: uuid, type: z.enum(['TRELLO', 'GITHUB']), name: z.string().min(1), config: z.record(z.unknown()) }) })), createIntegration);
 router.get('/integrations', listIntegrations);

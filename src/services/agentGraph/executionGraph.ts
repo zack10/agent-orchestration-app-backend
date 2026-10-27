@@ -1,5 +1,5 @@
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
-import { Prisma } from "@prisma/client";
+import { Prisma, Repository } from "@prisma/client";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ExecutionAgentMode, config } from "../../config";
@@ -30,10 +30,13 @@ import {
   changes,
   cloneGithubWorkspace,
   gitDiff,
+  SetupFailedError,
   prepareVerification,
   setupWorkspace,
   removeWorkspace,
   resetWorkspace,
+  restoreClone,
+  trackedFiles,
   startSandbox,
   stopSandbox,
   verifyWorkspace,
@@ -41,6 +44,7 @@ import {
 } from "../workspaceService";
 import {
   Toolchain,
+  ToolchainResolution,
   describeEnvironment,
   describeToolchain,
   isTestFile,
@@ -48,6 +52,14 @@ import {
   resolveToolchain,
   selectChecks,
 } from "../toolchain";
+import {
+  FixedEnvironment,
+  StoredProposal,
+  applyProposal,
+  discoverEnvironment,
+  discoveryFiles,
+  hashProposal,
+} from "../toolchain/discovery";
 import { AgentStopReason, runAgentLoop } from "./agentLoop";
 import { reviewDiffSafety } from "./diffReview";
 import { fileActionsError } from "./outputFormat";
@@ -83,6 +95,8 @@ const ExecutionGraphState = Annotation.Root({
   toolchain: Annotation<Toolchain | undefined>(),
   // What setup installed inside the workspace, restored before verification.
   setupOutputs: Annotation<string[]>({ reducer: (_old, value) => value, default: () => [] }),
+  // Set when the run uses an environment the agent proposed and nobody approved yet.
+  environmentProposal: Annotation<ProposedEnvironment | undefined>(),
   // The environment as the prompts describe it (image, checks and their commands).
   environment: Annotation<string | undefined>(),
   internalPlan: Annotation<string>({
@@ -225,6 +239,101 @@ const graphEvent = async (
   });
 };
 
+/** An unapproved environment the run uses, for the PR body. */
+export interface ProposedEnvironment {
+  repositoryId: string;
+  hash: string;
+  checks: Record<string, string[]>;
+}
+
+type SetupResult = Awaited<ReturnType<typeof setupWorkspace>>;
+
+const describeFixed = (fixed: FixedEnvironment) =>
+  [
+    ...(fixed.image ? [`Image: ${fixed.image}`] : []),
+    ...(fixed.setup ? [`Setup: ${fixed.setup.join(" ")}`] : []),
+  ].join("\n") || "Nothing.";
+
+/**
+ * Sets the workspace up in the repository's environment. With approved
+ * checks that is the resolved toolchain as it is. Without, the agent
+ * proposes an environment from the project's files (or the proposal an
+ * earlier run proved is reused), and setup plus the checks on the unmodified
+ * code prove it; a proposal that fails goes back to the agent. A proved
+ * proposal is stored on the repository until a person approves it. If none
+ * works, the run continues in the resolved toolchain (the default image).
+ */
+const prepareEnvironment = async (
+  executionId: string,
+  repository: Repository,
+  resolution: ToolchainResolution,
+  ask: (prompt: RenderedPrompt) => Promise<string>,
+): Promise<{ toolchain: Toolchain; setup: SetupResult; environmentProposal?: ProposedEnvironment }> => {
+  const checksFor = (toolchain: Toolchain) => selectChecks(toolchain, repository.verificationConfig).run;
+  const setUp = async (toolchain: Toolchain) => {
+    const setup = await setupWorkspace(executionId, toolchain, checksFor(toolchain));
+    return { toolchain: { ...toolchain, image: setup.image }, setup };
+  };
+  if (Object.keys(resolution.toolchain.checks).length || !config.executionDiscoveryMaxAttempts)
+    return setUp(resolution.toolchain);
+
+  const fixed: FixedEnvironment = {
+    ...(resolution.source !== "default" ? { image: resolution.toolchain.image } : {}),
+    ...(resolution.toolchain.setup !== null ? { setup: resolution.toolchain.setup } : {}),
+  };
+  const stored = repository.environmentProposal as unknown as StoredProposal | null;
+  const files = discoveryFiles(fsRepoFiles(workspacePath(executionId)), await trackedFiles(executionId));
+  let proofs = 0;
+  const result = await discoverEnvironment(
+    { fixed, stored: stored?.toolchain, storedRationale: stored?.rationale, maxAttempts: config.executionDiscoveryMaxAttempts },
+    {
+      ask: (lastAttempt) =>
+        ask(renderExecutionPrompt("discover", { fixed: describeFixed(fixed), files, lastAttempt })),
+      prove: async (proposal) => {
+        if (proofs++) await restoreClone(executionId);
+        const toolchain = applyProposal(resolution.toolchain, proposal);
+        try {
+          return await setupWorkspace(executionId, toolchain, checksFor(toolchain));
+        } catch (error) {
+          if (!(error instanceof SetupFailedError)) throw error;
+          return { setupError: error.message, image: toolchain.image, baseline: [], setupOutputs: [] };
+        }
+      },
+    },
+  );
+  await graphEvent(executionId, "GRAPH_ENVIRONMENT_DISCOVERED", {
+    proven: result.proven,
+    fromStored: result.fromStored,
+    rationale: result.rationale,
+    attempts: result.attempts,
+  });
+  if (!result.proven || !result.proposal || !result.proof) {
+    if (proofs) await restoreClone(executionId);
+    return setUp(resolution.toolchain);
+  }
+
+  const hash = hashProposal(result.proposal);
+  if (stored?.hash !== hash) {
+    const proposal: StoredProposal = {
+      toolchain: result.proposal,
+      rationale: result.rationale,
+      executionId,
+      proposedAt: new Date().toISOString(),
+      hash,
+    };
+    await prisma.repository.update({
+      where: { id: repository.id },
+      data: { environmentProposal: proposal as unknown as Prisma.InputJsonObject },
+    });
+  }
+  const toolchain = applyProposal(resolution.toolchain, result.proposal);
+  return {
+    toolchain: { ...toolchain, image: result.proof.image },
+    setup: result.proof,
+    environmentProposal: { repositoryId: repository.id, hash, checks: toolchain.checks },
+  };
+};
+
 const loadExecutionContext = async (
   state: typeof ExecutionGraphState.State,
 ) => {
@@ -271,6 +380,18 @@ const loadExecutionContext = async (
     baseSha,
     githubToken,
   );
+  const agentMode = config.executionAgentMode;
+  const budget = (execution.budget ?? {}) as ExecutionBudget;
+  const maxSteps = positive(budget.maxSteps, config.agentMaxSteps);
+  const maxTokens = positive(budget.maxTokens, 200_000);
+  const deadline =
+    Date.now() + positive(budget.maxDurationSeconds, 1800) * 1000;
+  const resolved = llm.resolveModel(agent);
+  const agentConfig = agent.config as { apiKey?: string } | null;
+  const agentApiKey = agentConfig?.apiKey
+    ? decrypt(agentConfig.apiKey)
+    : undefined;
+
   // The repository's configuration or the project's own definition decides
   // the image, setup step and checks; nothing is chosen per language.
   const resolution = resolveToolchain(
@@ -285,17 +406,23 @@ const loadExecutionContext = async (
     setup: resolution.toolchain.setup !== null,
     checks: Object.keys(resolution.toolchain.checks),
   });
+  // Discovery's model calls count against this execution's budget.
+  const ask = (prompt: RenderedPrompt) =>
+    askAgent(
+      { ...state, agentProvider: resolved.provider, agentModel: resolved.model, agentApiKey, maxTokens },
+      prompt,
+    );
   // Later commands run in the snapshot taken after setup and the baseline checks.
-  const { image, baseline, setupOutputs } = await setupWorkspace(
+  const { toolchain, setup, environmentProposal } = await prepareEnvironment(
     execution.id,
-    resolution.toolchain,
-    selectChecks(resolution.toolchain, execution.repository.verificationConfig).run,
+    execution.repository,
+    resolution,
+    ask,
   );
-  const toolchain = { ...resolution.toolchain, image };
   // Failures here existed before the agent changed anything.
   await graphEvent(execution.id, "GRAPH_BASELINE_CHECKED", {
-    results: baseline.map(({ check, passed }) => ({ check, passed })),
-    failing: baseline.filter((result) => !result.passed).map((result) => result.check),
+    results: setup.baseline.map(({ check, passed }) => ({ check, passed })),
+    failing: setup.baseline.filter((result) => !result.passed).map((result) => result.check),
   });
 
   await prisma.execution.update({
@@ -306,12 +433,6 @@ const loadExecutionContext = async (
     where: { planTaskId: planTask.id },
     _max: { number: true },
   });
-  const agentMode = config.executionAgentMode;
-  const budget = (execution.budget ?? {}) as ExecutionBudget;
-  const maxSteps = positive(budget.maxSteps, config.agentMaxSteps);
-  const maxTokens = positive(budget.maxTokens, 200_000);
-  const deadline =
-    Date.now() + positive(budget.maxDurationSeconds, 1800) * 1000;
   await graphEvent(execution.id, "GRAPH_CONTEXT_LOADED", {
     repositoryId: execution.repositoryId,
     workItemId: execution.workItemId,
@@ -320,12 +441,6 @@ const loadExecutionContext = async (
     budget: { maxSteps, maxTokens, maxDurationSeconds: (deadline - Date.now()) / 1000 },
     promptVersions: promptVersionsFor(agentMode),
   });
-
-  const resolved = llm.resolveModel(agent);
-  const agentConfig = agent.config as { apiKey?: string } | null;
-  const agentApiKey = agentConfig?.apiKey
-    ? decrypt(agentConfig.apiKey)
-    : undefined;
 
   return {
     baseSha,
@@ -341,7 +456,8 @@ const loadExecutionContext = async (
     maxTokens,
     deadline,
     toolchain,
-    setupOutputs,
+    setupOutputs: setup.setupOutputs,
+    environmentProposal,
     environment: describeEnvironment(
       toolchain,
       selectChecks(toolchain, execution.repository.verificationConfig).run,
@@ -812,7 +928,10 @@ const createDiffArtifact = async (state: typeof ExecutionGraphState.State) => {
         name: "changes.diff",
         storagePath: artifactPath,
         sha256,
-        metadata: state.verification as unknown as Prisma.InputJsonObject,
+        metadata: {
+          ...state.verification,
+          ...(state.environmentProposal ? { environmentProposal: state.environmentProposal } : {}),
+        } as unknown as Prisma.InputJsonObject,
       },
     }),
     prisma.approval.create({

@@ -364,7 +364,16 @@ There is no list of supported languages: any language, framework or platform wor
 2. **The project's own devcontainer** (`.devcontainer/devcontainer.json` or `.devcontainer.json`): its `image`, `containerEnv`/`remoteEnv`, and its `onCreateCommand`, `updateContentCommand` and `postCreateCommand` as setup. Devcontainers that build a Dockerfile, use Docker Compose or add features aren't supported yet; what was skipped is reported.
 3. **The default image**, `EXECUTION_DEFAULT_IMAGE` (`mcr.microsoft.com/devcontainers/universal:2`, GitHub Codespaces' default, with the common languages installed). Pinned by digest; a 3.8 GB download (15 GB on disk), once per server. It has no Rust toolchain: a Rust repository needs its own image.
 
-We never write an environment into the user's project. Checks only come from the repository's configuration: a repository with none still gets changes, but the draft PR is marked **Unverified**. (A discovery step that proposes the checks for a person to approve once is planned; see the roadmap.) What was used, and why, is recorded as a `GRAPH_TOOLCHAIN_RESOLVED` event.
+We never write an environment into the user's project. What was used, and why, is recorded as a `GRAPH_TOOLCHAIN_RESOLVED` event.
+
+**Discovery, approved once.** A repository needs no configuration to start. When it has no configured checks, the agent reads what the project says about itself (README, contributing and agent instruction files, CI configuration, build and dependency files) and proposes an environment: a small image that fits, a setup command and the checks. What the devcontainer or the configuration already fixes is kept. The proposal is proved by running setup and the checks on the unmodified code; a setup that fails, or a check that can't run, goes back to the agent with its output to revise (up to `EXECUTION_DISCOVERY_MAX_ATTEMPTS`, default 3; `0` turns discovery off). A check that runs but fails on the project's own tests still proves the environment. The run then uses it, and its draft PR says the checks were proposed by the agent and not approved yet. The proposal is stored on the repository (`environmentProposal`), and later runs prove it again instead of asking the model. A person approves it once:
+
+```http
+POST /api/repositories/:id/environment/approve
+{ "proposalHash": "<environmentProposal.hash>" }
+```
+
+It then becomes the repository's `verificationConfig.toolchain`, and every later run uses its checks as fixed checks. If no proposal works, the run uses the default image with no checks and its PR is marked **Unverified**. Each discovery is recorded as a `GRAPH_ENVIRONMENT_DISCOVERED` event with every proposal tried and how it did.
 
 ```json
 {
@@ -388,7 +397,7 @@ We never write an environment into the user's project. Checks only come from the
 ## Setting up the Trello → GitHub workflow
 
 1. **GitHub App**: create one with *Contents* and *Pull requests* read/write, install it on the target repository, and set `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` (PEM on one line with `\n`).
-2. **Repository record**: `POST /api/repositories` with owner, name and installation ID. Set its environment in `verificationConfig` (see [Repository environment](#repository-environment)); without checks, its PRs are marked Unverified.
+2. **Repository record**: `POST /api/repositories` with owner, name and installation ID. Its environment can be set in `verificationConfig`, or left to discovery and approved once (see [Repository environment](#repository-environment)).
 3. **Trello integration**: `POST /api/integrations` with `type: "TRELLO"` and config `apiKey`, `token`, `boardId`, `eligibleLabel`, `repositoryId`.
 4. **Agent**: `POST /api/agents` in the same project with `provider`, `model` and `config.apiKey`. The run uses the project's first agent.
 5. Label a card, then wait for the poller or call `POST /api/integrations/:id/sync`.
@@ -413,7 +422,7 @@ All routes are under `/api` and require the bearer token.
 | Skills | `POST/GET /skills`, `GET/PUT/DELETE /skills/:id`, `POST /skills/assign` |
 | Tasks | `POST /tasks` (202, `Idempotency-Key`), `GET /tasks`, `GET /tasks/:id` |
 | LLM | `GET /llm/providers`, `POST /llm/discover`, `GET /llm/models` (`X-Provider-Api-Key`), `GET /llm/usage`, `GET /llm/usage/today` (tokens used today against `LLM_DAILY_TOKEN_LIMIT`) |
-| Repositories | `POST/GET /repositories`, `PATCH /repositories/:id` (environment, policy) |
+| Repositories | `POST/GET /repositories`, `PATCH /repositories/:id` (environment, policy), `POST /repositories/:id/environment/approve` (approve a discovered environment) |
 | Integrations | `POST/GET /integrations`, `POST /integrations/:id/sync` |
 | Work items | `GET /work-items`, `GET /work-items/:id` |
 | Executions | `POST/GET /executions`, `GET /executions/:id`, `POST /executions/:id/plans`, `POST /executions/:id/approvals/plan\|publish` |

@@ -126,6 +126,9 @@ export const config = {
   // without notice. Mirror it to your own registry for production.
   executionDefaultImage:
     process.env.EXECUTION_DEFAULT_IMAGE || DEFAULT_EXECUTION_IMAGE,
+  // Environments discovery may try (setup + baseline each) before a run
+  // falls back to the default image. 0 turns discovery off.
+  executionDiscoveryMaxAttempts: parseNonNegativeInt(process.env.EXECUTION_DISCOVERY_MAX_ATTEMPTS, 3),
   storeRawLlmOutput: process.env.STORE_RAW_LLM_OUTPUT === "true",
 };
 

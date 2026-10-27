@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { config } from "../config";
-import { SANDBOX_ROOT, Toolchain } from "./toolchain";
+import { SANDBOX_ROOT, Toolchain, commandText } from "./toolchain";
 
 const exec = promisify(execFile);
 const safeId = (id: string) => {
@@ -228,6 +228,11 @@ export const removeEnvironmentSnapshot = async (id: string) => {
     await exec("docker", args).catch(() => undefined);
 };
 
+/** Starting the image or running the setup command failed; the message is its output. */
+export class SetupFailedError extends Error {
+  name = "SetupFailedError";
+}
+
 /** How a check did on the unmodified code, during setup. */
 export interface BaselineResult {
   check: string;
@@ -273,9 +278,13 @@ export const setupWorkspace = async (
   const run = (command: string[]) =>
     execDocker(["exec", setupContainer(id), ...command], undefined, SETUP_TIMEOUT_MS);
   try {
-    await execDocker(args);
+    try {
+      await execDocker(args);
+      if (toolchain.setup) await run(toolchain.setup);
+    } catch (error) {
+      throw new SetupFailedError((error as Error).message);
+    }
     if (toolchain.setup) {
-      await run(toolchain.setup);
       // A fresh clone has no untracked files: these all came from setup.
       setupOutputs = (await untrackedFiles(id, true, "all")).map((entry) => entry.replace(/\/$/, ""));
       if (setupOutputs.length)
@@ -339,6 +348,16 @@ export const WORKSPACE_RESET_COMMANDS = [
 ];
 export const resetWorkspace = async (id: string) => {
   for (const command of WORKSPACE_RESET_COMMANDS) await runDocker(id, command);
+};
+/**
+ * Returns the workspace to a fresh clone: no changes, no untracked or ignored
+ * files and no diff exclusions, so another environment can be set up in it.
+ */
+export const restoreClone = async (id: string) => {
+  await removeEnvironmentSnapshot(id);
+  await runDocker(id, [...SAFE_GIT_ARGS, "reset", "--hard", "--quiet"]);
+  await runDocker(id, [...SAFE_GIT_ARGS, "clean", "-ffdx", "--quiet"]);
+  await fs.writeFile(path.join(workspacePath(id), ".git", "info", "exclude"), "");
 };
 export const gitDiff = async (id: string) => {
   await runDocker(id, [...SAFE_GIT_ARGS, "add", "-N", "."]);
@@ -486,6 +505,16 @@ export const describeVerification = (verification: unknown) => {
       : `Checks passed: ${ran.join(", ")}.`,
   ];
   if (unavailable.length) lines.push(`Not available in this repository: ${unavailable.join(", ")}.`);
+  const { environmentProposal: proposal } = (verification ?? {}) as {
+    environmentProposal?: { repositoryId: string; hash: string; checks: Record<string, string[]> };
+  };
+  if (proposal)
+    lines.push(
+      "",
+      "**These checks were proposed by the agent from the project's files and are not approved yet:**",
+      ...Object.entries(proposal.checks).map(([name, command]) => `- ${name}: \`${commandText(command)}\``),
+      `Approve them once and every later run uses them as fixed checks: \`POST /api/repositories/${proposal.repositoryId}/environment/approve\` with \`{ "proposalHash": "${proposal.hash}" }\`.`,
+    );
   return lines.join("\n");
 };
 

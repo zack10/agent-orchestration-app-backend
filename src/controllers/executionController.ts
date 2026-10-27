@@ -1,7 +1,11 @@
+import { Prisma } from "@prisma/client";
 import { Request, Response } from "express";
 import { config } from "../config";
 import prisma from "../db";
+import { AppError } from "../errors/AppError";
 import { asyncHandler } from "../middleware/asyncHandler";
+import { parseVerificationConfig } from "../services/toolchain";
+import { StoredProposal } from "../services/toolchain/discovery";
 import {
   createExecution,
   decideApproval,
@@ -48,6 +52,37 @@ export const updateRepository = asyncHandler(
         data: { verificationConfig, executionPolicy },
       }),
     );
+  },
+);
+/**
+ * Approves the environment discovery proposed and a run proved: it becomes
+ * the repository's configured environment, so later runs use its checks as
+ * fixed checks. The hash must match, so what is approved is what was proved.
+ */
+export const approveEnvironment = asyncHandler(
+  async (req: Request, res: Response) => {
+    const repository = await prisma.repository.findUnique({ where: { id: req.params.id } });
+    if (!repository) throw AppError.notFound("Repository not found");
+    const proposal = repository.environmentProposal as unknown as StoredProposal | null;
+    if (!proposal) throw AppError.conflict("This repository has no proposed environment to approve");
+    if (proposal.hash !== req.body.proposalHash)
+      throw AppError.conflict("The proposed environment has changed; review the current proposal and approve its hash");
+
+    const current = parseVerificationConfig(repository.verificationConfig);
+    const verificationConfig = parseVerificationConfig({
+      ...current,
+      toolchain: { ...current.toolchain, ...proposal.toolchain },
+    });
+    // Only if nothing changed the repository since it was read.
+    const { count } = await prisma.repository.updateMany({
+      where: { id: repository.id, updatedAt: repository.updatedAt },
+      data: {
+        verificationConfig: verificationConfig as Prisma.InputJsonObject,
+        environmentProposal: Prisma.DbNull,
+      },
+    });
+    if (!count) throw AppError.conflict("The repository changed while approving; try again");
+    res.json(await prisma.repository.findUniqueOrThrow({ where: { id: repository.id } }));
   },
 );
 export const listRepositories = asyncHandler(
