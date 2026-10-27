@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 
+const { loadSuites } = require("./codingScenarios");
 const { api, env, external, poll } = require("./helpers");
 
 const PIPELINE_ENV = [
@@ -95,18 +96,12 @@ const ensureFixtures = async () => {
   else await api("POST", "/api/agents", { body: { ...agentBody, projectId: project.id }, expectStatus: 201 });
 
   // The sandbox repository's environment, as a person would approve it: the
-  // benchmark project is Node, so it runs npm in a Node image. E2E_ENVIRONMENT
-  // (JSON verificationConfig) replaces it for a repository in another stack.
+  // e2e suites use the Node benchmark project, so its suite.json environment.
+  // E2E_ENVIRONMENT (JSON verificationConfig) replaces it for a repository in
+  // another stack, or with no checks to exercise discovery.
   const verificationConfig = process.env.E2E_ENVIRONMENT
     ? JSON.parse(process.env.E2E_ENVIRONMENT)
-    : {
-        toolchain: {
-          image: "node:20-bookworm",
-          setup: ["npm", "ci", "--ignore-scripts"],
-          checks: { test: ["npm", "test"] },
-          protectedPaths: ["package.json", "package-lock.json", ".github"],
-        },
-      };
+    : loadSuites().find((suite) => suite.name === "node").environment;
 
   // Repositories are unique by owner/name, so reuse one if it already exists,
   // updating its environment when it differs.

@@ -1,0 +1,7 @@
+{
+  "title": "Nightly job ran several times after downtime",
+  "description": "After the service was down for the weekend, the nightly report job ran several times in a row as soon as it came back, once for each missed night. It should just run once, at its next scheduled time.",
+  "expect": "fix",
+  "expectedFiles": ["schedule/schedule.go"],
+  "measures": "Vague ticket: the agent has to find the cause from the symptom"
+}

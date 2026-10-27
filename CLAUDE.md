@@ -30,7 +30,7 @@ New test files must be added to the explicit list in the `test` script in `packa
 
 `tests/e2e/` is separate: those suites call the HTTP API (and Trello/GitHub for setup and cleanup) instead of `dist/`, are not part of `npm test`, and skip themselves when their `E2E_*` variables are unset. Add new e2e files to the `test:e2e` script. Shared pipeline helpers (fixtures, Trello/GitHub, waiting on executions) are in `tests/e2e/pipeline.js`.
 
-The coding benchmark (`tests/e2e/codingEval.js`) uses `tests/e2e/coding-scenarios/`: `repo/` is the clean project, each `NN-*/` has `scenario.json`, `bug/` (files planting the bug) and `hidden.test.js`. Hidden tests must never be pushed to the sandbox repo. `tests/codingScenarios.test.js` (in `npm test`) proves each scenario is valid; keep it passing when editing scenarios.
+The coding benchmark (`tests/e2e/codingEval.js`) uses `tests/e2e/coding-scenarios/<suite>/`, one project per language (`node`, `python`, `go`): `suite.json` (the environment the sandbox repo runs with, the grader image and commands, the test-file pattern), `repo/` (the clean project), and each `NN-*/` has `scenario.json`, `bug/` (files planting the bug) and `hidden/` (test files added at the same paths for grading). Hidden tests must never be pushed to the sandbox repo. `tests/codingScenarios.test.js` (in `npm test`, needs Docker, skipped without it) proves each scenario is valid in its grader image; keep it passing when editing scenarios. A new language is a new suite folder, not a code change.
 
 ## No lock-in requirement
 

@@ -1,7 +1,8 @@
 // Coding benchmark runner (Phase 0 of docs/plans/AGENTIC_ROADMAP.md).
 //
 //   npm run eval:coding                       every scenario, E2E_EVAL_RUNS times
-//   npm run eval:coding -- --scenario 01,05   only these scenarios
+//   npm run eval:coding -- --scenario python  one suite (node, python, go)
+//   npm run eval:coding -- --scenario node/01,go   by id or prefix ("01" is 01 of every suite)
 //   npm run eval:coding -- --runs 3           runs per scenario
 //   npm run eval:coding -- --check            check the setup without any LLM calls
 //
@@ -13,22 +14,17 @@
 //
 // Needs everything the execution e2e suite needs plus E2E_GITHUB_TOKEN with
 // Contents read/write on the sandbox repo. It REWRITES that repo's main branch.
+//
+// Each suite (a project in one language) runs with its own environment from
+// suite.json, set on the sandbox repository first.
 const { execFile } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const { promisify } = require("node:util");
 
 const { api, assertServerHealthy, env, envInt, runId, skipUnless } = require("./helpers");
-const {
-  cleanFiles,
-  diffStats,
-  hiddenTestPath,
-  loadScenarios,
-  scenarioFiles,
-  writeTree,
-} = require("./codingScenarios");
+const { cleanFiles, diffStats, grade, isTestFile, loadScenarios, loadSuites, scenarioFiles } = require("./codingScenarios");
 const {
   PIPELINE_ENV,
   createCard,
@@ -44,11 +40,12 @@ const {
 } = require("./pipeline");
 
 const execFileAsync = promisify(execFile);
+// The suite the sandbox repository is left on, which the other e2e suites expect.
+const DEFAULT_SUITE = "node";
 const PLAN_TIMEOUT_MS = envInt("E2E_PLAN_TIMEOUT_MS", 120_000);
 const RUN_TIMEOUT_MS = envInt("E2E_RUN_TIMEOUT_MS", 1_200_000);
 const RUN_END_STATES = ["AWAITING_PUBLISH_APPROVAL", "BLOCKED", "FAILED", "CANCELED"];
 const REPORT_DIR = path.resolve(__dirname, "..", "..", "docs", "testing");
-const GRADER_IMAGE = "node:20-bookworm";
 
 const OUTCOMES = {
   correct_fix: "Correct fix",
@@ -106,62 +103,28 @@ const checkSetup = async () => {
     tree: tree.sha,
     parents: [ref.object.sha],
   });
-  const grade = await gradeDiff(loadScenarios()[0], "");
-  if (!grade.visiblePassed) throw new Error(`grading container failed:\n${grade.output}`);
+  for (const suite of loadSuites()) {
+    const result = await grade(suite, cleanFiles(suite), new Map());
+    if (!result.visiblePassed) throw new Error(`${suite.name}: grading container failed:\n${result.output}`);
+  }
   log(`setup OK: server, Docker grading, Trello fixtures, and write access to ${repoPath()} (${branch} untouched)`);
 };
 
-/** Runs a command in a throwaway container without network access. */
-const docker = async (mounts, command) => {
-  const args = ["run", "--rm", "--network", "none", "--cpus", "2", "--memory", "1g", "--pids-limit", "256"];
-  for (const [hostPath, containerPath, mode = "rw"] of mounts) args.push("-v", `${hostPath}:${containerPath}:${mode}`);
-  args.push("-w", "/w", GRADER_IMAGE, ...command);
-  try {
-    const result = await execFileAsync("docker", args, { timeout: 180_000, maxBuffer: 5_000_000 });
-    return { passed: true, output: `${result.stdout}\n${result.stderr}` };
-  } catch (error) {
-    return { passed: false, output: `${error.stdout ?? ""}\n${error.stderr ?? error.message}` };
-  }
-};
+/** Grades an approved diff: the scenario's code with the diff applied, its own tests, then the hidden test. */
+const gradeDiff = (scenario, diff) => grade(scenario.suite, scenarioFiles(scenario), scenario.hiddenFiles, diff);
 
-/**
- * Grades an approved diff the way a reviewer would: apply it to the scenario's
- * starting code, run the repo's own tests, then the hidden test. The agent's
- * code runs only inside the container.
- */
-const gradeDiff = async (scenario, diff) => {
-  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "coding-eval-"));
-  const patchDir = fs.mkdtempSync(path.join(os.tmpdir(), "coding-eval-patch-"));
-  try {
-    writeTree(workDir, scenarioFiles(scenario));
-    fs.writeFileSync(path.join(patchDir, "changes.diff"), diff);
-    const mounts = [
-      [workDir, "/w"],
-      [patchDir, "/patch", "ro"],
-    ];
+/** The environment a suite runs with: its suite.json, or E2E_ENVIRONMENT for every suite. */
+const suiteEnvironment = (suite) =>
+  process.env.E2E_ENVIRONMENT ? JSON.parse(process.env.E2E_ENVIRONMENT) : suite.environment;
 
-    // A real run never produces an empty diff; the setup check grades one.
-    if (diff.trim()) {
-      const applied = await docker(mounts, ["git", "apply", "--whitespace=nowarn", "/patch/changes.diff"]);
-      if (!applied.passed) return { applied: false, visiblePassed: false, hiddenPassed: false, output: applied.output };
-    }
-
-    const visible = await docker(mounts, ["node", "--test"]);
-    // The hidden test is added only after the repo's own tests ran.
-    if (scenario.hiddenTest) writeTree(workDir, new Map([[hiddenTestPath(scenario), scenario.hiddenTest]]));
-    const hidden = scenario.hiddenTest
-      ? await docker(mounts, ["node", "--test", hiddenTestPath(scenario)])
-      : { passed: true, output: "" };
-    return {
-      applied: true,
-      visiblePassed: visible.passed,
-      hiddenPassed: hidden.passed,
-      output: [visible.passed ? "" : visible.output, hidden.passed ? "" : hidden.output].join("\n").trim(),
-    };
-  } finally {
-    fs.rmSync(workDir, { recursive: true, force: true });
-    fs.rmSync(patchDir, { recursive: true, force: true });
-  }
+/** Sets the sandbox repository's environment, if it differs. */
+const useEnvironment = async (fixtures, verificationConfig) => {
+  if (JSON.stringify(fixtures.repository.verificationConfig) === JSON.stringify(verificationConfig)) return;
+  const { data } = await api("PATCH", `/api/repositories/${fixtures.repository.id}`, {
+    body: { verificationConfig },
+    expectStatus: 200,
+  });
+  fixtures.repository = data;
 };
 
 /** Mode, attempts, LLM calls and prompt versions, read from the execution's events. */
@@ -191,9 +154,10 @@ const eventMetrics = (events) => {
 const runScenario = async (fixtures, scenario, runNumber) => {
   const id = runId();
   const started = Date.now();
-  const result = { scenario: scenario.id, run: runNumber, outcome: "infra_failure", note: "" };
+  const result = { scenario: scenario.id, language: scenario.suite.language, run: runNumber, outcome: "infra_failure", note: "" };
   let cardId;
   try {
+    await useEnvironment(fixtures, suiteEnvironment(scenario.suite));
     const baseSha = await setDefaultBranch(scenarioFiles(scenario), `benchmark: ${scenario.id} (${id})`);
     cardId = await createCard(`[${id}] ${scenario.title}`, scenario.description);
     const workItem = await ingestCard(fixtures, cardId);
@@ -230,8 +194,9 @@ const runScenario = async (fixtures, scenario, runNumber) => {
       result.linesAdded = stats.added;
       result.linesRemoved = stats.removed;
       // Adding test cases is fine; changing or deleting existing ones is the gaming risk.
-      const addedTest = (file) => file.startsWith("tests/") && !stats.editedFiles.includes(file);
-      result.testsModified = stats.editedFiles.some((file) => file.startsWith("tests/"));
+      const testFile = (file) => isTestFile(scenario.suite, file);
+      const addedTest = (file) => testFile(file) && !stats.editedFiles.includes(file);
+      result.testsModified = stats.editedFiles.some(testFile);
       result.testsAdded = stats.files.some(addedTest);
       // Added tests are reported in their own column, so they don't count as unexpected files.
       result.onlyExpectedFiles = stats.files.every((file) => addedTest(file) || scenario.expectedFiles.includes(file));
@@ -240,15 +205,15 @@ const runScenario = async (fixtures, scenario, runNumber) => {
         result.outcome = "wrong_fix_shipped";
         result.note = "a PR would have been opened for an impossible ticket";
       } else {
-        const grade = await gradeDiff(scenario, diff);
-        if (!grade.applied) {
-          result.note = `diff did not apply: ${grade.output.trim().slice(0, 300)}`;
-        } else if (grade.visiblePassed && grade.hiddenPassed) {
+        const graded = await gradeDiff(scenario, diff);
+        if (!graded.applied) {
+          result.note = `diff did not apply: ${graded.output.trim().slice(0, 300)}`;
+        } else if (graded.visiblePassed && graded.hiddenPassed) {
           result.outcome = "correct_fix";
         } else {
           result.outcome = "wrong_fix_shipped";
-          result.note = grade.hiddenPassed ? "repo tests failed" : "hidden test failed";
-          result.gradeOutput = grade.output.slice(-1500);
+          result.note = graded.hiddenPassed ? "repo tests failed" : "hidden test failed";
+          result.gradeOutput = graded.output.slice(-1500);
         }
       }
     } else if (execution.status === "BLOCKED") {
@@ -318,6 +283,15 @@ const writeReport = (results, meta) => {
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     `| ${summary.runs} | ${summary.correct} | ${summary.wrong} | ${summary.blocked} | ${summary.noFix} | ${summary.infra} | ${percent(summary.correct + summary.blocked, summary.graded)} | ${percent(summary.wrong, summary.graded)} | ${summary.avgAttempts} |`,
     "",
+    "By language:",
+    "",
+    "| Language | Runs | Correct fix | Wrong fix shipped | Correctly blocked | No fix (blocked) | Infra failures |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
+    ...[...new Set(results.map((result) => result.language))].map((language) => {
+      const own = summarize(results.filter((result) => result.language === language));
+      return `| ${language} | ${own.runs} | ${own.correct} | ${own.wrong} | ${own.blocked} | ${own.noFix} | ${own.infra} |`;
+    }),
+    "",
     "## Runs",
     "",
     "| Scenario | Run | Outcome | Attempts | LLM calls | Duration | Files changed | Lines +/- | Only expected files (besides added tests) | Tests added | Existing tests changed | Note |",
@@ -354,7 +328,8 @@ const main = async () => {
 
   let scenarios = loadScenarios();
   if (options.scenarios) {
-    scenarios = scenarios.filter((scenario) => options.scenarios.some((id) => scenario.id.startsWith(id)));
+    const matches = (scenario, id) => scenario.id.startsWith(id) || scenario.id.split("/")[1].startsWith(id);
+    scenarios = scenarios.filter((scenario) => options.scenarios.some((id) => matches(scenario, id)));
     if (!scenarios.length) throw new Error(`No scenario matches ${options.scenarios.join(", ")}`);
   }
 
@@ -367,15 +342,19 @@ const main = async () => {
   const { stdout: commit } = await execFileAsync("git", ["rev-parse", "--short", "HEAD"]).catch(() => ({ stdout: "unknown" }));
 
   const started = Date.now();
-  log(`${scenarios.length} scenario(s) x ${options.runs} run(s) with ${env("E2E_LLM_PROVIDER")}/${env("E2E_LLM_MODEL")}`);
+  log(`${scenarios.length} scenario(s) in ${[...new Set(scenarios.map((scenario) => scenario.suite.name))].join(", ")} x ${options.runs} run(s) with ${env("E2E_LLM_PROVIDER")}/${env("E2E_LLM_MODEL")}`);
   const results = [];
   try {
     for (const scenario of scenarios)
       for (let run = 1; run <= options.runs; run += 1) results.push(await runScenario(fixtures, scenario, run));
   } finally {
     // Leave the sandbox on the clean project so other suites start from it.
-    await setDefaultBranch(cleanFiles(), "benchmark: restore clean project").catch((error) =>
+    const suite = loadSuites().find((candidate) => candidate.name === DEFAULT_SUITE);
+    await setDefaultBranch(cleanFiles(suite), "benchmark: restore clean project").catch((error) =>
       log(`could not restore ${env("E2E_GITHUB_DEFAULT_BRANCH", "main")}: ${error.message}`),
+    );
+    await useEnvironment(fixtures, suiteEnvironment(suite)).catch((error) =>
+      log(`could not restore the repository's environment: ${error.message}`),
     );
   }
 

@@ -504,7 +504,9 @@ The execution suite creates a real Trello card and, unless `E2E_PUBLISH=false`, 
 
 ### Coding benchmark
 
-The e2e suites prove the plumbing works; the benchmark measures whether the agent writes **correct** code. `tests/e2e/coding-scenarios/` holds a small clean JS project (`repo/`) and 8 scenarios, each with a ticket, the files that plant its bug, and a **hidden test** that never leaves this repository:
+The e2e suites prove the plumbing works; the benchmark measures whether the agent writes **correct** code. `tests/e2e/coding-scenarios/` holds one suite per language: a small clean project (`repo/`), the environment it runs with and how it is graded (`suite.json`), and scenarios, each with a ticket, the files that plant its bug, and **hidden tests** that never leave this repository. Adding a language is a new suite folder, not a code change.
+
+Node (`node/`, `node:test`):
 
 | # | Scenario | Measures |
 | --- | --- | --- |
@@ -517,15 +519,24 @@ The e2e suites prove the plumbing works; the benchmark measures whether the agen
 | 07 | Bug in a 30 KB file | The 20 KB context cut-off |
 | 08 | Impossible "send invoices to LegacyBill" ticket | Should end `BLOCKED` |
 
-Per run, the runner points the sandbox repo's `main` at the scenario's code, creates the Trello card, approves the plan, waits for a diff or `BLOCKED`, **rejects publishing** (no PR is opened), and grades the diff in a network-less Docker container: the repo's own tests, then the hidden test. Outcomes are *correct fix*, *wrong fix shipped* (a PR would have been opened but the hidden test fails, which is the key number), *correctly blocked*, *no fix* and *infrastructure failure*. It writes `docs/testing/coding-eval-<date>.md`, prints a row for the roadmap's results log, and restores `main` to the clean project.
+Python (`python/`, `unittest`) and Go (`go/`, `go test`), standard library only:
+
+| # | Python | Go | Measures |
+| --- | --- | --- | --- |
+| 01 | Discount tiers miss their minimum | `Truncate` cuts accented characters | Basic single-file fix |
+| 02 | Invoice totals a few cents off (`money` and `invoice`) | Negative amounts parsed and printed wrong (`Parse` and `Format`) | Multi-file change |
+| 03 | Vague "reorder list is missing things" | Vague "nightly job ran several times after downtime" | Finding the cause from a symptom |
+
+Per run, the runner points the sandbox repo's `main` at the scenario's code, creates the Trello card, approves the plan, waits for a diff or `BLOCKED`, **rejects publishing** (no PR is opened), and grades the diff in a network-less Docker container: the repo's own tests, then the hidden tests, in the suite's grader image. Outcomes are *correct fix*, *wrong fix shipped* (a PR would have been opened but the hidden test fails, which is the key number), *correctly blocked*, *no fix* and *infrastructure failure*. It writes `docs/testing/coding-eval-<date>.md`, prints a row for the roadmap's results log, and restores `main` to the clean project.
 
 ```bash
 npm run eval:coding -- --check            # setup check, no LLM calls
-npm run eval:coding -- --scenario 01      # one scenario
+npm run eval:coding -- --scenario python  # one suite (node, python, go)
+npm run eval:coding -- --scenario node/01  # one scenario ("01" alone is 01 of every suite)
 npm run eval:coding -- --runs 3           # every scenario, 3 runs each
 ```
 
-It needs the execution suite's variables plus `E2E_GITHUB_TOKEN` (Contents read/write on the sandbox repo), the server and Docker on the same machine (it reads the diff artifact from disk), and **it rewrites the sandbox repo's `main`**. `npm test` includes `tests/codingScenarios.test.js`, which checks every scenario is fair: the clean project passes everything, and each bug passes the repo's tests but fails its hidden test.
+It needs the execution suite's variables plus `E2E_GITHUB_TOKEN` (Contents read/write on the sandbox repo), the server and Docker on the same machine (it reads the diff artifact from disk), and **it rewrites the sandbox repo's `main`**. `npm test` includes `tests/codingScenarios.test.js`, which checks every scenario is fair in its grader image (so it needs Docker, and is skipped without it): the clean project passes everything, and each bug passes the repo's tests but fails its hidden test by an assertion. Each suite runs with the environment in its `suite.json`; `E2E_ENVIRONMENT` replaces it for every suite.
 
 ## Troubleshooting
 
