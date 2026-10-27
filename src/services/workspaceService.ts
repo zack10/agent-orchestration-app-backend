@@ -263,14 +263,21 @@ export const setupWorkspace = async (
   id: string,
   toolchain: Toolchain,
   checks: Array<{ name: string; command: string[] }>,
+  options: { cacheFor?: string } = {},
 ) => {
   const baseline: BaselineResult[] = [];
   let setupOutputs: string[] = [];
-  if (!toolchain.setup && !checks.length) return { image: toolchain.image, baseline, setupOutputs };
+  if (!toolchain.setup && !checks.length)
+    return { image: toolchain.image, baseline, setupOutputs, cache: "none" as CacheUse };
 
   await removeEnvironmentSnapshot(id);
+  const cache =
+    options.cacheFor && config.executionSnapshotMaxAgeHours
+      ? environmentCacheImage(options.cacheFor, toolchain, checks)
+      : undefined;
+  const reuse = cache !== undefined && (await isFreshImage(cache, config.executionSnapshotMaxAgeHours));
   const args = dockerArgs(workspacePath(id), true, false, ["sleep", "infinity"], {
-    image: toolchain.image,
+    image: reuse ? cache : toolchain.image,
     env: toolchain.env,
   });
   // Same limits as every container, but long-lived so it can be committed.
@@ -287,6 +294,8 @@ export const setupWorkspace = async (
     if (toolchain.setup) {
       // A fresh clone has no untracked files: these all came from setup.
       setupOutputs = (await untrackedFiles(id, true, "all")).map((entry) => entry.replace(/\/$/, ""));
+      // A reused snapshot holds an earlier run's copy; only this run's counts.
+      await run(["rm", "-rf", SETUP_COPY_DIR]);
       if (setupOutputs.length)
         await run(["sh", "-c", COPY_ENTRIES, "sh", SANDBOX_ROOT, SETUP_COPY_DIR, ...setupOutputs]);
     }
@@ -297,13 +306,75 @@ export const setupWorkspace = async (
       } catch (error) {
         baseline.push({ check: name, passed: false, output: (error as Error).message.slice(-4000) });
       }
-    await execDocker(["commit", setupContainer(id), snapshotImage(id)]);
+    await execDocker([
+      "commit",
+      "--change",
+      `LABEL ${CACHE_LABEL}=${cache ? cacheRepository(cache) : "none"}`,
+      setupContainer(id),
+      snapshotImage(id),
+    ]);
   } finally {
     await exec("docker", ["rm", "-f", setupContainer(id)]).catch(() => undefined);
   }
+  // Only a snapshot built from the plain image becomes the cache, so layers
+  // never pile up across runs; a stale cache is rebuilt the same way.
+  if (cache && !reuse) await storeEnvironmentCache(snapshotImage(id), cache);
   // A fresh clone has no untracked files, so everything here came from setup.
   await excludeFromDiffs(id, await untrackedFiles(id, true));
-  return { image: snapshotImage(id), baseline, setupOutputs };
+  return { image: snapshotImage(id), baseline, setupOutputs, cache: (cache ? (reuse ? "reused" : "built") : "none") as CacheUse };
+};
+
+/**
+ * Environment snapshots are reused across runs of one repository, the way
+ * Codex caches its containers: a run starts from the cached snapshot and
+ * runs setup again with network, so dependency changes are still installed
+ * but what is already there is not downloaded again. Nothing is chosen per
+ * tool or language. The key is the environment (image, setup, env, checks),
+ * so a changed or newly approved environment starts fresh. A snapshot holds
+ * whatever the repository's setup ran, so it is never shared between
+ * repositories.
+ */
+export type CacheUse = "none" | "built" | "reused";
+const CACHE_LABEL = "agent.environment-cache";
+const cacheRepository = (image: string) => image.split(":")[0];
+
+export const environmentCacheImage = (
+  scope: string,
+  toolchain: Pick<Toolchain, "image" | "setup" | "env">,
+  checks: Array<{ name: string; command: string[] }>,
+) => {
+  const key = crypto
+    .createHash("sha256")
+    .update(JSON.stringify([toolchain.image, toolchain.setup, Object.entries(toolchain.env).sort(), checks]))
+    .digest("hex")
+    .slice(0, 32);
+  return `agent-cache-${safeId(scope).toLowerCase()}:${key}`;
+};
+
+/** Whether an image was created less than maxAgeHours ago (false if it doesn't exist). */
+export const isFresh = (created: string, maxAgeHours: number, now = Date.now()) => {
+  const time = Date.parse(created);
+  return Number.isFinite(time) && now - time < maxAgeHours * 3_600_000;
+};
+const isFreshImage = async (image: string, maxAgeHours: number) => {
+  try {
+    const { stdout } = await exec("docker", ["image", "inspect", "--format", "{{.Created}}", image]);
+    return isFresh(stdout.trim(), maxAgeHours);
+  } catch {
+    return false;
+  }
+};
+
+/** Tags the snapshot as the repository's cache and drops its older caches that nothing uses. */
+const storeEnvironmentCache = async (snapshot: string, cache: string) => {
+  await execDocker(["tag", snapshot, cache]);
+  const { stdout } = await exec("docker", ["images", cacheRepository(cache), "--format", "{{.Repository}}:{{.Tag}}"]);
+  for (const old of stdout.split("\n").map((line) => line.trim()).filter((line) => line && line !== cache))
+    await exec("docker", ["rmi", old]).catch(() => undefined);
+  // Replaced caches still used by a running execution's snapshot stay until it ends.
+  await exec("docker", ["image", "prune", "-f", "--filter", `label=${CACHE_LABEL}=${cacheRepository(cache)}`]).catch(
+    () => undefined,
+  );
 };
 
 // Inside the snapshot, outside the workspace: what setup installed there.

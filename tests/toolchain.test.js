@@ -163,6 +163,33 @@ test("the PR body says which checks ran, and when none did", () => {
   );
 });
 
+test("environment snapshots are cached per repository and per environment", () => {
+  const { environmentCacheImage } = require("../dist/services/workspaceService");
+  const toolchain = { image: "example/runtime:1", setup: ["sh", "-c", "make deps"], env: { A: "1", B: "2" } };
+  const checks = [{ name: "test", command: ["make", "test"] }];
+  const image = environmentCacheImage("Repo-1", toolchain, checks);
+  assert.match(image, /^agent-cache-repo-1:[0-9a-f]{32}$/, "a valid docker reference");
+  assert.equal(environmentCacheImage("Repo-1", { ...toolchain, env: { B: "2", A: "1" } }, checks), image, "env order does not matter");
+
+  const other = [
+    environmentCacheImage("repo-2", toolchain, checks),
+    environmentCacheImage("Repo-1", { ...toolchain, image: "example/runtime:2" }, checks),
+    environmentCacheImage("Repo-1", { ...toolchain, setup: null }, checks),
+    environmentCacheImage("Repo-1", { ...toolchain, env: { A: "1" } }, checks),
+    environmentCacheImage("Repo-1", toolchain, [{ name: "test", command: ["make", "check"] }]),
+  ];
+  assert.equal(new Set([image, ...other]).size, 6, "any change to the environment is another cache");
+  assert.throws(() => environmentCacheImage("../x", toolchain, checks), /Unsafe workspace id/);
+});
+
+test("a cached snapshot is reused only while it is younger than the limit", () => {
+  const { isFresh } = require("../dist/services/workspaceService");
+  const now = Date.parse("2026-10-27T12:00:00Z");
+  assert.equal(isFresh("2026-10-27T01:00:00.123456789Z", 24, now), true);
+  assert.equal(isFresh("2026-10-26T11:59:00Z", 24, now), false);
+  assert.equal(isFresh("not a date", 24, now), false);
+});
+
 test("default test-file patterns follow common conventions across ecosystems", () => {
   const { toolchain } = resolve({});
   const cases = [

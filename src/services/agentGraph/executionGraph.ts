@@ -271,7 +271,7 @@ const prepareEnvironment = async (
 ): Promise<{ toolchain: Toolchain; setup: SetupResult; environmentProposal?: ProposedEnvironment }> => {
   const checksFor = (toolchain: Toolchain) => selectChecks(toolchain, repository.verificationConfig).run;
   const setUp = async (toolchain: Toolchain) => {
-    const setup = await setupWorkspace(executionId, toolchain, checksFor(toolchain));
+    const setup = await setupWorkspace(executionId, toolchain, checksFor(toolchain), { cacheFor: repository.id });
     return { toolchain: { ...toolchain, image: setup.image }, setup };
   };
   if (Object.keys(resolution.toolchain.checks).length || !config.executionDiscoveryMaxAttempts)
@@ -293,10 +293,10 @@ const prepareEnvironment = async (
         if (proofs++) await restoreClone(executionId);
         const toolchain = applyProposal(resolution.toolchain, proposal);
         try {
-          return await setupWorkspace(executionId, toolchain, checksFor(toolchain));
+          return await setupWorkspace(executionId, toolchain, checksFor(toolchain), { cacheFor: repository.id });
         } catch (error) {
           if (!(error instanceof SetupFailedError)) throw error;
-          return { setupError: error.message, image: toolchain.image, baseline: [], setupOutputs: [] };
+          return { setupError: error.message, image: toolchain.image, baseline: [], setupOutputs: [], cache: "none" as const };
         }
       },
     },
@@ -423,6 +423,7 @@ const loadExecutionContext = async (
   await graphEvent(execution.id, "GRAPH_BASELINE_CHECKED", {
     results: setup.baseline.map(({ check, passed }) => ({ check, passed })),
     failing: setup.baseline.filter((result) => !result.passed).map((result) => result.check),
+    environmentSnapshot: setup.cache,
   });
 
   await prisma.execution.update({

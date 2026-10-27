@@ -128,6 +128,9 @@ export const config = {
     process.env.EXECUTION_DEFAULT_IMAGE || DEFAULT_EXECUTION_IMAGE,
   // Environments discovery may try (setup + baseline each) before a run
   // falls back to the default image. 0 turns discovery off.
+  // A repository's environment snapshot is reused for this long, then rebuilt
+  // from its image. 0 turns reuse off.
+  executionSnapshotMaxAgeHours: parseNonNegativeInt(process.env.EXECUTION_SNAPSHOT_MAX_AGE_HOURS, 24),
   executionDiscoveryMaxAttempts: parseNonNegativeInt(process.env.EXECUTION_DISCOVERY_MAX_ATTEMPTS, 3),
   storeRawLlmOutput: process.env.STORE_RAW_LLM_OUTPUT === "true",
 };
