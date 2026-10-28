@@ -51,3 +51,6 @@ scratch/
 
 # Graphify knowledge graph (generated locally)
 graphify-out/
+
+# Codex project config (personal Graphify MCP setup)
+.codex/
