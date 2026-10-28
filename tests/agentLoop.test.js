@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { compactMessages, runAgentLoop } = require("../dist/services/agentGraph/agentLoop");
+const { attemptAllowance, compactMessages, describeAttempt, runAgentLoop } = require("../dist/services/agentGraph/agentLoop");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -114,12 +114,161 @@ test("the token budget counts input and output tokens", async () => {
 test("the agent is warned once when most of its budget is used", async () => {
   // 500 tokens a step against 2400: the warning threshold (1920) is passed at step 4.
   const model = scriptedModel([{ calls: [["list_files", {}]] }], { inputTokens: 400, outputTokens: 100 });
-  const result = await runAgentLoop(input({ budget: budget({ maxTokens: 2400 }) }), { ...model, ...fakeTools() });
+  let calls = 0;
+  const runTool = async () => ({ status: "COMPLETED", output: `list ${++calls}` });
+  const result = await runAgentLoop(input({ budget: budget({ maxTokens: 2400 }) }), { ...model, runTool });
   assert.equal(result.stopReason, "max_tokens");
   const results = model.requests.at(-1).messages.filter((m) => m.role === "tool").map((m) => m.content);
-  assert.deepEqual(results.slice(0, 3), ["list_files ok", "list_files ok", "list_files ok"]);
-  assert.match(results[3], /^list_files ok\n\n\[Budget: 4 of 10 steps and 2000 of 2400 tokens used\. .*call finish now/);
+  assert.deepEqual(results.slice(0, 3), ["list 1", "list 2", "list 3"]);
+  assert.match(results[3], /^list 4\n\n\[Budget: 4 of 10 steps and 2000 of 2400 tokens used\. .*call finish now/);
   assert.equal(results.length, 4);
+});
+
+test("a result identical to one still shown is replaced by a note, and repeats are flagged", async () => {
+  const model = scriptedModel([
+    { calls: [["read_file", { path: "a.js", startLine: 1 }]] },
+    // Same call with its arguments in another order: still the same call.
+    { calls: [["read_file", { startLine: 1, path: "a.js" }], ["read_file", { path: "b.js" }]] },
+    { calls: [["read_file", { path: "a.js", startLine: 1 }]] },
+    { calls: [["finish", { status: "done", summary: "ok" }]] },
+  ]);
+  const runTool = async (call) =>
+    call.name === "finish"
+      ? { status: "COMPLETED", output: "Finished.", finish: call.arguments }
+      : { status: "COMPLETED", output: `contents of ${call.arguments.path}` };
+  await runAgentLoop(input(), { ...model, runTool });
+
+  const results = model.requests.at(-1).messages.filter((m) => m.role === "tool").map((m) => m.content);
+  assert.equal(results[0], "contents of a.js");
+  assert.match(results[1], /^\[Same result as your identical read_file call at step 1, which is shown above/);
+  assert.equal(results[2], "contents of b.js");
+  assert.match(results[3], /at step 1.*\n\[You have made this exact call 3 times with the same result/);
+});
+
+test("a repeated call whose result changed, or whose earlier copy is shortened, gets the full output", async () => {
+  let version = 1;
+  const model = scriptedModel([
+    { calls: [["read_file", { path: "a.js" }]] },
+    { calls: [["edit_file", { path: "a.js" }]] },
+    { calls: [["read_file", { path: "a.js" }]] },
+    ...Array.from({ length: 8 }, (_, i) => ({ calls: [["read_file", { path: `other${i}.js` }]] })),
+    { calls: [["read_file", { path: "a.js" }]] },
+    { calls: [["finish", { status: "done", summary: "ok" }]] },
+  ]);
+  const runTool = async (call) => {
+    if (call.name === "finish") return { status: "COMPLETED", output: "Finished.", finish: call.arguments };
+    if (call.name === "edit_file") return { status: "COMPLETED", output: `edited to ${++version}` };
+    return { status: "COMPLETED", output: `${call.arguments.path} v${version}\n${"x".repeat(500)}` };
+  };
+  await runAgentLoop(input({ budget: budget({ maxSteps: 20 }) }), { ...model, runTool });
+
+  const results = model.requests.at(-1).messages.filter((m) => m.role === "tool").map((m) => m.content);
+  assert.match(results[2], /^a\.js v2\n/, "the file changed, so it is shown again");
+  // Eight other results later, the step-3 copy is shortened, so it is sent in full again.
+  assert.match(results.at(-1), /^a\.js v2\nx{500}$/);
+});
+
+test("at its share, an attempt with changes is told to wrap up and can still finish", async () => {
+  // 500 tokens a step: the 1000-token share is reached before step 3.
+  const model = scriptedModel(
+    [
+      { calls: [["read_file", { path: "a.js" }]] },
+      { calls: [["edit_file", { path: "a.js" }]] },
+      { calls: [["run_check", { name: "test" }]] },
+      { calls: [["finish", { status: "done", summary: "Fixed." }]] },
+    ],
+    { inputTokens: 400, outputTokens: 100 },
+  );
+  let asked = 0;
+  const result = await runAgentLoop(
+    input({ budget: budget({ soft: { maxTokens: 1000, deadline: Date.now() + 60_000 } }) }),
+    { ...model, ...fakeTools(), hasChanges: async () => (++asked, true) },
+  );
+  assert.equal(result.stopReason, "done");
+  assert.equal(result.steps, 4);
+  assert.equal(asked, 1, "asked once, when the share is reached");
+  const results = model.requests[2].messages.filter((m) => m.role === "tool").map((m) => m.content);
+  assert.match(results.at(-1), /^edit_file ok\n\n\[Budget: .*\]\n\n\[This attempt has used its share of the budget\. You have 3 more steps/);
+});
+
+test("at its share, an attempt with no changes stops", async () => {
+  const model = scriptedModel([{ calls: [["list_files", {}]] }], { inputTokens: 400, outputTokens: 100 });
+  const result = await runAgentLoop(
+    input({ budget: budget({ soft: { maxTokens: 1000, deadline: Date.now() + 60_000 } }) }),
+    { ...model, ...fakeTools(), hasChanges: async () => false },
+  );
+  assert.equal(result.stopReason, "max_tokens");
+  assert.equal(model.requests.length, 2);
+  assert.match(result.summary, /this attempt's 1000 tokens/);
+});
+
+test("the wrap-up steps are limited, and the hard limit still applies during them", async () => {
+  const model = scriptedModel([{ calls: [["list_files", {}]] }], { inputTokens: 400, outputTokens: 100 });
+  const soft = { maxTokens: 1000, deadline: Date.now() + 60_000, graceSteps: 2 };
+  const graceEnded = await runAgentLoop(input({ budget: budget({ soft }) }), {
+    ...model,
+    ...fakeTools(),
+    hasChanges: async () => true,
+  });
+  assert.equal(graceEnded.stopReason, "max_tokens");
+  assert.equal(graceEnded.steps, 4, "2 steps to the share, then 2 wrap-up steps");
+  assert.match(graceEnded.summary, /The 2 wrap-up steps ended without finish/);
+
+  const hard = await runAgentLoop(input({ budget: budget({ maxTokens: 1500, soft }) }), {
+    ...scriptedModel([{ calls: [["list_files", {}]] }], { inputTokens: 400, outputTokens: 100 }),
+    ...fakeTools(),
+    hasChanges: async () => true,
+  });
+  assert.equal(hard.steps, 3, "the execution's budget ends the wrap-up early");
+  assert.match(hard.summary, /of 1500 tokens/);
+});
+
+test("the soft time limit works like the token share", async () => {
+  let clock = 0;
+  const model = scriptedModel([{ calls: [["list_files", {}]] }]);
+  const tools = fakeTools();
+  const result = await runAgentLoop(
+    input({ budget: budget({ deadline: 1000, soft: { maxTokens: 100_000, deadline: 100 } }) }),
+    { ...model, runTool: async (call) => ((clock += 40), tools.runTool(call)), now: () => clock, hasChanges: async () => false },
+  );
+  assert.equal(result.stopReason, "timeout");
+  assert.equal(model.requests.length, 3);
+  assert.match(result.summary, /this attempt's share of the time budget/);
+});
+
+test("with a share, the budget warning is based on the share", async () => {
+  const model = scriptedModel([{ calls: [["list_files", {}]] }], { inputTokens: 400, outputTokens: 100 });
+  await runAgentLoop(input({ budget: budget({ soft: { maxTokens: 2400, deadline: Date.now() + 60_000 } }) }), {
+    ...model,
+    ...fakeTools(),
+    hasChanges: async () => false,
+  });
+  const results = model.requests.at(-1).messages.filter((m) => m.role === "tool").map((m) => m.content);
+  assert.match(results[3], /\[Budget: 4 of 10 steps and 2000 of 2400 tokens used/);
+});
+
+test("every attempt but the last gets a share of what is left", () => {
+  assert.equal(attemptAllowance(180_000, 1, 3, 0.5), 90_000);
+  // A first attempt that used 30k of its 90k leaves 150k: the second gets half of it.
+  assert.equal(attemptAllowance(150_000, 2, 3, 0.5), 75_000);
+  assert.equal(attemptAllowance(75_000, 3, 3, 0.5), 75_000, "the last attempt gets everything left");
+  assert.equal(attemptAllowance(1000, 1, 1, 0.5), 1000, "a single attempt is also the last");
+});
+
+test("an attempt's account keeps its last steps when it is too long", () => {
+  const step = (n, output) => ({
+    step: n,
+    text: n === 1 ? "Reading the module." : "",
+    toolCalls: [{ call: { id: `c${n}`, name: "read_file", arguments: { path: `f${n}.js` } }, outcome: { status: "COMPLETED", output } }],
+    usage: { inputTokens: 0, outputTokens: 0 },
+  });
+  const short = describeAttempt([step(1, "one"), step(2, "two")]);
+  assert.equal(short, 'Step 1: Reading the module.\n  read_file {"path":"f1.js"} -> COMPLETED: one\nStep 2:\n  read_file {"path":"f2.js"} -> COMPLETED: two');
+
+  const long = describeAttempt(Array.from({ length: 20 }, (_, i) => step(i + 1, "y".repeat(1000))), 2000);
+  assert.match(long, /^\(\d+ earlier steps left out\)\nStep \d+:/);
+  assert.match(long, /Step 20:\n  read_file .* -> COMPLETED: y{400}… \(600 more characters\)$/);
+  assert.ok(long.length < 2200);
 });
 
 test("the time budget is checked before each model call", async () => {
@@ -178,7 +327,7 @@ test("the agent prompt gets the environment and keeps ticket text out of the sys
     repoOverview: "Repository file tree sample:\nsrc/a.js",
     lastFailure: "None",
   });
-  assert.equal(prompt.version, "agent.v3");
+  assert.equal(prompt.version, "agent.v4");
   assert.match(prompt.user, /Repository overview:\nRepository file tree sample/);
   assert.match(prompt.user, /Repository environment:\nImage: example\/image:1\nChecks:\n- test: make test/);
   assert.match(prompt.system, /run_command/);

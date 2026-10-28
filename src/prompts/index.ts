@@ -9,9 +9,9 @@ import path from "node:path";
 export const EXECUTION_PROMPTS = {
   plan: "plan.v3",
   implement: "implement.v2",
-  agent: "agent.v3",
-  analyze: "analyze.v1",
-  review: "review.v2",
+  agent: "agent.v4",
+  analyze: "analyze.v2",
+  review: "review.v3",
   discover: "discover.v1",
   fileFormat: "file-format.v1",
 } as const;

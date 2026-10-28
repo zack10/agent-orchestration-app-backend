@@ -60,7 +60,7 @@ import {
   discoveryFiles,
   hashProposal,
 } from "../toolchain/discovery";
-import { AgentStopReason, runAgentLoop } from "./agentLoop";
+import { AgentStep, AgentStopReason, attemptAllowance, describeAttempt, runAgentLoop } from "./agentLoop";
 import { reviewDiffSafety } from "./diffReview";
 import { fileActionsError } from "./outputFormat";
 import { RepoContext, collectRepoContext } from "./repoContext";
@@ -68,6 +68,7 @@ import { RepositoryPolicy, checkExistingTests, checkRepositoryPolicy } from "./r
 
 const llm = new LLMService();
 const MAX_ATTEMPTS = 3;
+const DEFAULT_ATTEMPT_SHARE = 0.5;
 const FILE_BLOCK_FORMAT = executionPromptFragment("fileFormat");
 
 type VerificationResult = Awaited<ReturnType<typeof verifyWorkspace>>;
@@ -136,6 +137,22 @@ const ExecutionGraphState = Annotation.Root({
     reducer: (_current, update) => update,
     default: () => 0,
   }),
+  // Share of the remaining tokens and time each attempt but the last may use.
+  attemptShare: Annotation<number>({
+    reducer: (_current, update) => update,
+    default: () => DEFAULT_ATTEMPT_SHARE,
+  }),
+  // What the last tool-loop attempt did, for the failure analysis.
+  attemptLog: Annotation<string>({
+    reducer: (_current, update) => update,
+    default: () => "",
+  }),
+  // Whether the next attempt continues from the last attempt's changes
+  // instead of the base commit.
+  keepChanges: Annotation<boolean>({
+    reducer: (_current, update) => update,
+    default: () => false,
+  }),
 });
 
 type GraphState = typeof ExecutionGraphState.State;
@@ -192,6 +209,8 @@ interface ExecutionBudget {
   maxSteps?: number;
   maxTokens?: number;
   maxDurationSeconds?: number;
+  /** Share (0 to 1] of what is left that each attempt but the last may use. */
+  attemptShare?: number;
 }
 
 const positive = (value: unknown, fallback: number) =>
@@ -386,6 +405,7 @@ const loadExecutionContext = async (
   const maxTokens = positive(budget.maxTokens, 200_000);
   const deadline =
     Date.now() + positive(budget.maxDurationSeconds, 1800) * 1000;
+  const attemptShare = Math.min(1, positive(budget.attemptShare, DEFAULT_ATTEMPT_SHARE));
   const resolved = llm.resolveModel(agent);
   const agentConfig = agent.config as { apiKey?: string } | null;
   const agentApiKey = agentConfig?.apiKey
@@ -439,7 +459,7 @@ const loadExecutionContext = async (
     workItemId: execution.workItemId,
     planTaskId: planTask.id,
     agentMode,
-    budget: { maxSteps, maxTokens, maxDurationSeconds: (deadline - Date.now()) / 1000 },
+    budget: { maxSteps, maxTokens, maxDurationSeconds: (deadline - Date.now()) / 1000, attemptShare },
     promptVersions: promptVersionsFor(agentMode),
   });
 
@@ -456,6 +476,7 @@ const loadExecutionContext = async (
     maxSteps,
     maxTokens,
     deadline,
+    attemptShare,
     toolchain,
     setupOutputs: setup.setupOutputs,
     environmentProposal,
@@ -604,6 +625,14 @@ const LOOP_FAILURES: Record<Exclude<AgentStopReason, "done">, string> = {
   timeout: "The execution's time budget ran out",
   no_finish: "The agent stopped without finishing",
 };
+const ATTEMPT_SHARE_FAILURES = {
+  max_tokens: "The attempt used its share of the token budget",
+  timeout: "The attempt used its share of the time budget",
+};
+const KEPT_CHANGES =
+  "The changes the previous attempt made are kept in the repository: check them and continue from them.";
+const RESET_CHANGES =
+  "The repository is back at the unmodified code: none of the previous attempt's changes are kept.";
 
 /**
  * Tool-loop alternative to implement_change: the agent edits the workspace
@@ -612,8 +641,9 @@ const LOOP_FAILURES: Record<Exclude<AgentStopReason, "done">, string> = {
  */
 const agentLoop = async (state: GraphState) => {
   const { attempt, attemptNumber, ticket } = await startAttempt(state);
-  // Each attempt starts from the base commit, as in single-shot mode.
-  if (attemptNumber > 1) await resetWorkspace(state.executionId);
+  // Each attempt starts from the base commit, as in single-shot mode, unless
+  // the last one was only stopped by its share of the budget.
+  if (attemptNumber > 1 && !state.keepChanges) await resetWorkspace(state.executionId);
 
   const execution = await prisma.execution.findUniqueOrThrow({
     where: { id: state.executionId },
@@ -629,13 +659,32 @@ const agentLoop = async (state: GraphState) => {
     // re-sending the selected files' contents.
     repoOverview:
       state.repoContext?.overview ?? "No repository overview was collected.",
-    lastFailure: state.lastFailure || "None",
+    lastFailure: state.lastFailure
+      ? `${state.lastFailure}\n\n${state.keepChanges ? KEPT_CHANGES : RESET_CHANGES}`
+      : "None",
     environment: state.environment ?? "Unknown.",
   });
 
-  // The loop gets what is left of the execution's budget after planning
-  // and any earlier attempts.
+  // The loop may use what is left of the execution's budget after planning
+  // and any earlier attempts. Every attempt but the last also gets a share
+  // of it as a soft limit, so a retry still has room: past it, an attempt
+  // with no changes stops, and one with changes is told to wrap up.
   const usedBefore = await executionTokensUsed(state);
+  const tokensLeft = Math.max(0, state.maxTokens - usedBefore);
+  const timeLeft = Math.max(0, state.deadline - Date.now());
+  const attemptBudget = {
+    maxSteps: state.maxSteps,
+    maxTokens: tokensLeft,
+    deadline: state.deadline,
+    soft:
+      attemptNumber < MAX_ATTEMPTS
+        ? {
+            maxTokens: attemptAllowance(tokensLeft, attemptNumber, MAX_ATTEMPTS, state.attemptShare),
+            deadline: Date.now() + attemptAllowance(timeLeft, attemptNumber, MAX_ATTEMPTS, state.attemptShare),
+          }
+        : undefined,
+  };
+  const steps: AgentStep[] = [];
   await startSandbox(state.executionId, toolchain);
   let outcome: Awaited<ReturnType<typeof runAgentLoop>>;
   try {
@@ -644,18 +693,16 @@ const agentLoop = async (state: GraphState) => {
         system: prompt.system,
         task: prompt.user,
         tools: SANDBOX_TOOLS,
-        budget: {
-          maxSteps: state.maxSteps,
-          maxTokens: Math.max(0, state.maxTokens - usedBefore),
-          deadline: state.deadline,
-        },
+        budget: attemptBudget,
       },
       {
         generate: (request) => askAgentWithTools(state, request, prompt.version),
         runTool: (call) => runRecordedTool(ctx, call, recorder),
+        hasChanges: async () => (await changedFiles(state.executionId)).length > 0,
         // One event per model call; full tool input and output are in ToolCall.
-        onStep: (step) =>
-          graphEvent(state.executionId, "GRAPH_AGENT_STEP", {
+        onStep: (step) => {
+          steps.push(step);
+          return graphEvent(state.executionId, "GRAPH_AGENT_STEP", {
             attemptId: attempt.id,
             attemptNumber,
             step: step.step,
@@ -668,7 +715,8 @@ const agentLoop = async (state: GraphState) => {
               input: JSON.stringify(call.arguments).slice(0, MAX_EVENT_PREVIEW_CHARS),
               output: result.output.slice(0, MAX_EVENT_PREVIEW_CHARS),
             })),
-          }),
+          });
+        },
       },
     );
   } finally {
@@ -683,14 +731,32 @@ const agentLoop = async (state: GraphState) => {
     summary: outcome.summary.slice(0, MAX_EVENT_TEXT_CHARS),
     steps: outcome.steps,
     usage: outcome.usage,
+    attemptBudget: {
+      maxTokens: attemptBudget.maxTokens,
+      maxDurationSeconds: Math.round(timeLeft / 1000),
+      shareTokens: attemptBudget.soft?.maxTokens,
+    },
     tokensUsed,
   });
 
+  const attemptLog = describeAttempt(steps);
+  // Running out of this attempt's share, not of the execution's budget,
+  // leaves room for another attempt.
+  const executionSpent =
+    (outcome.stopReason === "max_tokens" && tokensUsed >= state.maxTokens) ||
+    (outcome.stopReason === "timeout" && Date.now() >= state.deadline);
+  const changed = await changedFiles(state.executionId);
   let failure: string;
+  let keepChanges = false;
   if (outcome.stopReason === "done") {
-    if ((await changedFiles(state.executionId)).length > 0)
-      return { attemptNumber, attemptId: attempt.id, route: "implemented" as GraphRoute };
+    if (changed.length > 0)
+      return { attemptNumber, attemptId: attempt.id, attemptLog, keepChanges, route: "implemented" as GraphRoute };
     failure = `The agent called finish without changing any files: ${outcome.summary}`;
+  } else if ((outcome.stopReason === "max_tokens" || outcome.stopReason === "timeout") && !executionSpent) {
+    // Stopped part-way, not wrong: the next attempt continues from these
+    // changes with a fresh conversation instead of redoing them.
+    keepChanges = changed.length > 0;
+    failure = `${ATTEMPT_SHARE_FAILURES[outcome.stopReason]}: ${outcome.summary}`;
   } else {
     failure = `${LOOP_FAILURES[outcome.stopReason]}: ${outcome.summary}`;
   }
@@ -700,15 +766,13 @@ const agentLoop = async (state: GraphState) => {
   });
   // A refusal is the agent's decision, and an exhausted execution budget
   // cannot recover; only a per-attempt failure is worth another attempt.
-  const final =
-    outcome.stopReason === "blocked" ||
-    outcome.stopReason === "max_tokens" ||
-    outcome.stopReason === "timeout" ||
-    attemptNumber >= MAX_ATTEMPTS;
+  const final = outcome.stopReason === "blocked" || executionSpent || attemptNumber >= MAX_ATTEMPTS;
   return {
     attemptNumber,
     attemptId: attempt.id,
     lastFailure: failure,
+    attemptLog,
+    keepChanges,
     route: (final ? "blocked" : "retry") as GraphRoute,
   };
 };
@@ -801,10 +865,15 @@ const verifyChange = async (state: typeof ExecutionGraphState.State) => {
 };
 
 const analyzeFailure = async (state: typeof ExecutionGraphState.State) => {
+  // In tool-loop mode the analysis also sees what the attempt did, not only
+  // how it ended.
   const prompt = renderExecutionPrompt("analyze", {
     ticket: state.ticket ?? "",
     internalPlan: state.internalPlan,
-    lastFailure: state.lastFailure,
+    lastFailure: state.attemptLog
+      ? `${state.lastFailure}\n\nWhat the attempt did:\n${state.attemptLog}`
+      : state.lastFailure,
+    workspace: state.keepChanges ? KEPT_CHANGES : RESET_CHANGES,
   });
   const raw = await askAgent(state, prompt);
   const parsed = parseJsonRecord(raw);
@@ -992,7 +1061,7 @@ const graph = new StateGraph(ExecutionGraphState)
   })
   .addConditionalEdges("agent_loop", routeAfterVerification, {
     implemented: "enforce_policy",
-    retry: "agent_loop",
+    retry: "analyze_failure",
     blocked: "block_execution",
   })
   .addConditionalEdges("enforce_policy", routeAfterVerification, {

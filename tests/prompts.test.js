@@ -110,6 +110,7 @@ const current = {
   ...variables,
   plan: { ...variables.plan, environment: ENVIRONMENT },
   implement: { ...variables.implement, environment: ENVIRONMENT },
+  analyze: { ...variables.analyze, workspace: "The repository is back at the unmodified code." },
 };
 
 const lines = (text) =>
@@ -193,6 +194,38 @@ test("plan.v2 and review.v2 extend v1 with the new-test-file rule and change not
   assert.match(renderExecutionPrompt("review", variables.review).system, /guidance, not a contract.*A new test file for the fix is expected/);
 });
 
+test("agent.v4 and review.v3 keep the earlier rules and add the benchmark's lessons", () => {
+  const agentVariables = { ticket: "t", environment: "e", internalPlan: "p", repoOverview: "o", lastFailure: "f" };
+  const agentV3 = renderPromptVersion("agent.v3", agentVariables);
+  const agentV4 = renderPromptVersion("agent.v4", agentVariables);
+  assert.equal(agentV4.user, agentV3.user);
+  assert.match(agentV4.system, /follow them through every one of those/);
+  assert.match(agentV4.system, /test you wrote fails, first check that its expected values are right/);
+  assert.match(agentV4.system, /Keep the functions, types and other names that other code may use/);
+  for (const rule of ["status \"blocked\"", "run_command", "existing test files", "do not stop at a change you have not verified"])
+    assert.ok(agentV4.system.includes(rule), `agent.v4 keeps "${rule}"`);
+
+  const reviewV2 = renderPromptVersion("review.v2", variables.review);
+  const reviewV3 = renderPromptVersion("review.v3", variables.review);
+  assert.equal(reviewV3.user, reviewV2.user);
+  const added = lines(reviewV3.system).filter((line) => !lines(reviewV2.system).includes(line));
+  assert.equal(added.length, 1, "review.v3 adds one paragraph");
+  assert.match(added[0], /^Reject if the diff removes or renames .* unless the ticket asks for that/);
+  assert.deepEqual(lines(reviewV2.system).filter((line) => !lines(reviewV3.system).includes(line)), [], "nothing removed");
+});
+
+test("analyze.v2 keeps analyze.v1 and adds where the next attempt starts and the test rule", () => {
+  const v1 = renderPromptVersion("analyze.v1", variables.analyze);
+  const v2 = renderPromptVersion("analyze.v2", current.analyze);
+  const added = lines(v2.system).filter((line) => !lines(v1.system).includes(line));
+  assert.equal(added.length, 2, "analyze.v2 adds two paragraphs");
+  assert.ok(added.some((line) => /starts again from the unmodified code/.test(line)));
+  assert.ok(added.some((line) => /must not change or delete existing test files/.test(line)));
+  assert.deepEqual(lines(v1.system).filter((line) => !lines(v2.system).includes(line)), [], "nothing removed");
+  assert.ok(v2.user.startsWith(v1.user));
+  assert.match(v2.user, /What the next attempt starts from:\nThe repository is back at the unmodified code\./);
+});
+
 test("the prompts in use name no language, package manager or file type", () => {
   // Only the templates are checked, so every variable is a neutral value.
   const neutral = (names) => Object.fromEntries(names.map((name) => [name, "x"]));
@@ -209,6 +242,6 @@ test("the prompts in use name no language, package manager or file type", () => 
   }
   assert.deepEqual(
     rendered.map((prompt) => prompt.version),
-    ["plan.v3", "implement.v2", "analyze.v1", "review.v2", "agent.v3", "discover.v1"],
+    ["plan.v3", "implement.v2", "analyze.v2", "review.v3", "agent.v4", "discover.v1"],
   );
 });
