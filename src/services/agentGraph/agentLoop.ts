@@ -220,7 +220,7 @@ export const runAgentLoop = async (
   let graceLeft: number | undefined;
   let softStop: { reason: "max_tokens" | "timeout"; summary: string } | undefined;
 
-  for (;;) {
+  for (; ;) {
     // Budgets are checked before each model call, so a call that is
     // started always gets to finish and record its tool results.
     if (steps >= budget.maxSteps)
