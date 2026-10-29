@@ -12,6 +12,10 @@ export const protectAgentConfig = (
   if (typeof config.apiKey === "string" && config.apiKey.length > 0) {
     config.apiKey = encrypt(config.apiKey);
   }
+  const reviewer = config.reviewer as JsonRecord | undefined;
+  if (typeof reviewer?.apiKey === "string" && reviewer.apiKey.length > 0) {
+    config.reviewer = { ...reviewer, apiKey: encrypt(reviewer.apiKey) };
+  }
   return config as Prisma.InputJsonObject;
 };
 
@@ -23,5 +27,10 @@ export const redactAgent = <T extends { config?: unknown }>(
     return safe;
   const publicConfig = { ...(config as JsonRecord) };
   delete publicConfig.apiKey;
+  if (publicConfig.reviewer && typeof publicConfig.reviewer === "object") {
+    const reviewer = { ...(publicConfig.reviewer as JsonRecord) };
+    delete reviewer.apiKey;
+    publicConfig.reviewer = reviewer;
+  }
   return { ...safe, config: publicConfig };
 };

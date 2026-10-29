@@ -19,7 +19,10 @@ const ask = { role: "user", content: "What does src/a.js export?" };
 
 const registry = new ProviderRegistry(
   parseProviderProfiles(
-    JSON.stringify([{ key: "local", baseUrl: "http://localhost:11434/v1" }]),
+    JSON.stringify([
+      { key: "local", baseUrl: "http://localhost:11434/v1" },
+      { key: "groq", baseUrl: "https://api.groq.com/openai/v1", supportsTools: true },
+    ]),
     {},
     "development",
   ),
@@ -121,7 +124,7 @@ test("Gemini: functionCall round trip, with thought signatures replayed unchange
   });
 });
 
-test("OpenAI-compatible: tool_calls round trip", async (t) => {
+test("OpenAI-compatible chat completions: tool_calls round trip", async (t) => {
   const bodies = scripted(t, [
     {
       choices: [
@@ -137,7 +140,7 @@ test("OpenAI-compatible: tool_calls round trip", async (t) => {
     },
     { choices: [{ finish_reason: "stop", message: { content: "It exports a." } }] },
   ]);
-  const turns = await roundTrip("openai", "gpt-4o");
+  const turns = await roundTrip("groq", "llama-3.3-70b");
   expectSameOutcome(turns, "call_9");
   assert.deepEqual(turns.first.usage, { inputTokens: 90, outputTokens: 12 });
 
@@ -154,6 +157,62 @@ test("OpenAI-compatible: tool_calls round trip", async (t) => {
     },
     { role: "tool", tool_call_id: "call_9", content: "module.exports = { a };" },
   ]);
+});
+
+test("OpenAI Responses API: function_call round trip, with reasoning items replayed unchanged", { todo: "Responses API provider code (roadmap limitation 24)" }, async (t) => {
+  const reasoning = { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "enc-789" };
+  const call = { type: "function_call", id: "fc_1", call_id: "call_7", name: "read_file", arguments: '{"path":"src/a.js"}' };
+  const bodies = scripted(t, [
+    { status: "completed", output: [reasoning, call], usage: { input_tokens: 80, output_tokens: 25 } },
+    {
+      status: "completed",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "It exports a." }] }],
+    },
+  ]);
+  const turns = await roundTrip("openai", "gpt-6-luna");
+  expectSameOutcome(turns, "call_7");
+  assert.deepEqual(turns.first.usage, { inputTokens: 80, outputTokens: 25 });
+
+  const [request1, request2] = bodies.map((entry) => entry.body);
+  assert.equal(bodies[0].url, "https://api.openai.com/v1/responses");
+  assert.equal(request1.instructions, "Be brief.");
+  assert.equal(request1.store, false, "nothing is kept on OpenAI's side");
+  assert.deepEqual(request1.include, ["reasoning.encrypted_content"]);
+  assert.deepEqual(request1.tools, [
+    { type: "function", name: "read_file", description: readFile.description, parameters: readFile.parameters },
+  ]);
+  assert.deepEqual(request1.input, [ask]);
+  assert.deepEqual(request2.input.slice(1), [
+    reasoning,
+    call,
+    { type: "function_call_output", call_id: "call_7", output: "module.exports = { a };" },
+  ]);
+});
+
+test("OpenAI Responses API: a turn from another provider is sent as plain items; incomplete replies raise", { todo: "Responses API provider code (roadmap limitation 24)" }, async (t) => {
+  const bodies = scripted(t, [
+    { status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] },
+    { status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [] },
+    { status: "incomplete", incomplete_details: { reason: "content_filter" }, output: [] },
+  ]);
+  const foreign = {
+    role: "assistant",
+    content: "Looking.",
+    toolCalls: [{ id: "toolu_1", name: "read_file", arguments: { path: "a" } }],
+    raw: { provider: "anthropic", content: [{ type: "thinking", signature: "s" }] },
+  };
+  await llm.generateWithTools("openai", "m", {
+    messages: [ask, foreign, { role: "tool", toolCallId: "toolu_1", name: "read_file", content: "A", isError: true }],
+    tools: [readFile],
+  });
+  assert.deepEqual(bodies[0].body.input.slice(1), [
+    { role: "assistant", content: "Looking." },
+    { type: "function_call", call_id: "toolu_1", name: "read_file", arguments: '{"path":"a"}' },
+    { type: "function_call_output", call_id: "toolu_1", output: "Error: A" },
+  ]);
+  const request = { messages: [ask], tools: [readFile] };
+  await assert.rejects(llm.generateWithTools("openai", "m", request), /truncated/);
+  await assert.rejects(llm.generateWithTools("openai", "m", request), /content filter/);
 });
 
 test("several results for one turn travel together; errors are marked", async (t) => {
@@ -194,8 +253,8 @@ test("unusable replies raise errors instead of being guessed at", async (t) => {
   await assert.rejects(llm.generateWithTools("anthropic", "m", request), /truncated/);
   await assert.rejects(llm.generateWithTools("anthropic", "m", request), /refused/);
   await assert.rejects(llm.generateWithTools("gemini", "m", request), /MALFORMED_FUNCTION_CALL/);
-  await assert.rejects(llm.generateWithTools("openai", "m", request), /invalid JSON arguments/);
-  await assert.rejects(llm.generateWithTools("openai", "m", request), /empty response/);
+  await assert.rejects(llm.generateWithTools("groq", "m", request), /invalid JSON arguments/);
+  await assert.rejects(llm.generateWithTools("groq", "m", request), /empty response/);
 });
 
 test("a profile without supportsTools is refused before any request is sent", async (t) => {

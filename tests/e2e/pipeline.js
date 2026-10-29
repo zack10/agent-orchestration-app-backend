@@ -108,9 +108,10 @@ const ensureFixtures = async () => {
   const owner = env("E2E_GITHUB_OWNER");
   const name = env("E2E_GITHUB_REPO");
   const { data: repositories } = await api("GET", "/api/repositories", { expectStatus: 200 });
-  const existing = repositories.find((candidate) => candidate.owner === owner && candidate.name === name);
+  let existing = repositories.find((candidate) => candidate.owner === owner && candidate.name === name);
+  // Keep the updated row: callers compare its environment to decide whether to switch it.
   if (existing && JSON.stringify(existing.verificationConfig) !== JSON.stringify(verificationConfig))
-    await api("PATCH", `/api/repositories/${existing.id}`, { body: { verificationConfig }, expectStatus: 200 });
+    existing = (await api("PATCH", `/api/repositories/${existing.id}`, { body: { verificationConfig }, expectStatus: 200 })).data;
   const repository =
     existing ??
     (

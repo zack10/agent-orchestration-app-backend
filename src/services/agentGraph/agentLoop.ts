@@ -176,11 +176,26 @@ export const describeAttempt = (steps: AgentStep[], maxChars = MAX_LOG_CHARS) =>
 };
 
 export const runAgentLoop = async (
-  input: { system: string; task: string; tools: ToolDefinition[]; budget: AgentLoopBudget },
+  input: {
+    system: string;
+    task: string;
+    tools: ToolDefinition[];
+    budget: AgentLoopBudget;
+    /** Replaces the reminders that name finish, for a loop that ends with another tool. */
+    reminders?: { nudge: string; budgetWarning: (used: string) => string };
+    /**
+     * The only tools offered on the last step, or once the token warning
+     * share is used, so the loop ends with an answer instead of running out.
+     */
+    finalTools?: ToolDefinition[];
+    /** Tool results shown in full; older ones are shortened (see compactMessages). */
+    keepRecentResults?: number;
+  },
   deps: AgentLoopDeps,
 ): Promise<AgentLoopResult> => {
   const now = deps.now ?? Date.now;
   const { budget } = input;
+  const keepRecent = input.keepRecentResults ?? KEEP_RECENT_RESULTS;
   const messages: ChatMessage[] = [{ role: "user", content: input.task }];
   const usage = { inputTokens: 0, outputTokens: 0 };
   let steps = 0;
@@ -201,7 +216,7 @@ export const runAgentLoop = async (
     }
     previous.count++;
     const warning = previous.count >= REPEAT_WARNING_CALLS ? `\n${repeatWarning(previous.count)}` : "";
-    if (stillShownInFull(messages, previous.messageIndex))
+    if (stillShownInFull(messages, previous.messageIndex, keepRecent))
       return `[Same result as your identical ${call.name} call at step ${previous.step}, which is shown above; nothing has changed since.]${warning}`;
     previous.messageIndex = index;
     previous.step = steps;
@@ -252,10 +267,12 @@ export const runAgentLoop = async (
     }
 
     steps++;
+    const lastCall =
+      steps >= budget.maxSteps || usage.inputTokens + usage.outputTokens >= budget.maxTokens * BUDGET_WARNING_SHARE;
     const turn = await deps.generate({
       system: input.system,
-      messages: compactMessages(messages),
-      tools: input.tools,
+      messages: compactMessages(messages, keepRecent),
+      tools: lastCall && input.finalTools ? input.finalTools : input.tools,
     });
     usage.inputTokens += turn.usage?.inputTokens ?? 0;
     usage.outputTokens += turn.usage?.outputTokens ?? 0;
@@ -267,7 +284,7 @@ export const runAgentLoop = async (
       if (nudges >= MAX_NUDGES)
         return result("no_finish", "The agent stopped calling tools without calling finish.");
       nudges++;
-      messages.push({ role: "user", content: NUDGE });
+      messages.push({ role: "user", content: input.reminders?.nudge ?? NUDGE });
       continue;
     }
 
@@ -299,7 +316,7 @@ export const runAgentLoop = async (
       warned = true;
       const last = messages[messages.length - 1];
       if (last.role === "tool")
-        last.content += `\n\n${budgetWarning(`${steps} of ${budget.maxSteps} steps and ${tokens} of ${limitTokens} tokens used`)}`;
+        last.content += `\n\n${(input.reminders?.budgetWarning ?? budgetWarning)(`${steps} of ${budget.maxSteps} steps and ${tokens} of ${limitTokens} tokens used`)}`;
     }
   }
 };

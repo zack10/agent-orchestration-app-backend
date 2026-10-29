@@ -129,3 +129,20 @@ test("agent validation accepts registered providers only", () => {
   assert.equal(rejected.success, false);
   assert.match(rejected.error.issues[0].message, /Unknown LLM provider/);
 });
+
+test("the built-in OpenAI profile calls tools through the Responses API unless OPENAI_TOOLS_API says chat", { todo: "Responses API provider code (roadmap limitation 24)" }, () => {
+  assert.equal(parseProviderProfiles("", {}, "development")[0].toolsApi, "responses");
+  assert.equal(parseProviderProfiles("", { OPENAI_TOOLS_API: "chat" }, "development")[0].toolsApi, "chat");
+  assert.throws(() => parseProviderProfiles("", { OPENAI_TOOLS_API: "soap" }, "development"), /OPENAI_TOOLS_API/);
+  assert.equal(parse([groq])[1].toolsApi, "chat", "other vendors default to chat completions");
+  assert.equal(parse([{ ...groq, toolsApi: "responses" }])[1].toolsApi, "responses");
+  assert.throws(() => parse([{ ...groq, toolsApi: "soap" }]), /toolsApi/);
+});
+
+test("agent validation checks config.reviewer and keeps other config as is", () => {
+  const body = (config) => ({ body: { name: "a", config } });
+  assert.equal(createAgentSchema.safeParse(body({ reviewer: { provider: "openai", model: "gpt-5" }, other: 1 })).success, true);
+  assert.equal(createAgentSchema.safeParse(body({ reviewer: { provider: "made-up", model: "x" } })).success, false);
+  assert.equal(createAgentSchema.safeParse(body({ reviewer: { provider: "openai" } })).success, false, "a model is required");
+  assert.equal(createAgentSchema.safeParse(body({ reviewer: { provider: "openai", model: "m", extra: 1 } })).success, false);
+});

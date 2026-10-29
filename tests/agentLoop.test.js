@@ -327,7 +327,7 @@ test("the agent prompt gets the environment and keeps ticket text out of the sys
     repoOverview: "Repository file tree sample:\nsrc/a.js",
     lastFailure: "None",
   });
-  assert.equal(prompt.version, "agent.v4");
+  assert.equal(prompt.version, "agent.v6");
   assert.match(prompt.user, /Repository overview:\nRepository file tree sample/);
   assert.match(prompt.user, /Repository environment:\nImage: example\/image:1\nChecks:\n- test: make test/);
   assert.match(prompt.system, /run_command/);
@@ -348,4 +348,40 @@ test("the repository overview lists relevant files without their contents", asyn
   assert.doesNotMatch(context.overview, /SECRET_BODY/);
   assert.match(context.overview, /Files that look relevant to the ticket: .*src\/pagination\.js/);
   assert.match(context.overview, /Checks: test/);
+});
+
+test("finalTools are the only tools offered on the last step and past the token warning", async () => {
+  const read = { name: "read_file" };
+  const verdict = { name: "verdict" };
+  const byStep = scriptedModel([{ calls: [["read_file", { path: "a" }]] }]);
+  const result = await runAgentLoop(
+    input({ tools: [read, verdict], finalTools: [verdict], budget: budget({ maxSteps: 3 }) }),
+    { ...byStep, ...fakeTools() },
+  );
+  assert.equal(result.stopReason, "max_steps");
+  assert.deepEqual(byStep.requests.map((request) => request.tools.map((tool) => tool.name)), [
+    ["read_file", "verdict"],
+    ["read_file", "verdict"],
+    ["verdict"],
+  ]);
+
+  // 110 tokens per call: 80% of 400 (320) is passed after the third call; the fifth is over budget.
+  const byTokens = scriptedModel([{ calls: [["read_file", { path: "a" }]] }]);
+  await runAgentLoop(input({ tools: [read, verdict], finalTools: [verdict], budget: budget({ maxTokens: 400 }) }), {
+    ...byTokens,
+    ...fakeTools(),
+  });
+  assert.deepEqual(byTokens.requests.map((request) => request.tools.length), [2, 2, 2, 1]);
+});
+
+test("keepRecentResults keeps more tool results in full", async () => {
+  const long = "x".repeat(1000);
+  const model = scriptedModel([...Array.from({ length: 12 }, (_, i) => ({ calls: [["read_file", { path: `f${i}` }]] })), { calls: [["finish", { status: "done", summary: "s" }]] }]);
+  await runAgentLoop(input({ keepRecentResults: 20, budget: budget({ maxSteps: 20 }) }), {
+    ...model,
+    runTool: async (call) => (call.name === "finish" ? { status: "COMPLETED", output: "", finish: call.arguments } : { status: "COMPLETED", output: long }),
+  });
+  const last = model.requests[model.requests.length - 1].messages.filter((message) => message.role === "tool");
+  assert.equal(last.length, 12);
+  assert.ok(last.every((message) => message.content === long), "nothing shortened");
 });

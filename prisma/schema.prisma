@@ -476,6 +476,15 @@ model OutboxEvent {
   @@index([status, availableAt])
 }
 
+/// The execution graph's latest checkpoints (encrypted, they hold the agent's
+/// API key), so a failed or interrupted run resumes from its last finished
+/// step. Deleted when the execution ends.
+model GraphCheckpoint {
+  executionId String   @id
+  data        String
+  updatedAt   DateTime @updatedAt
+}
+
 model InboxReceipt {
   messageId  String   @id
   consumer   String

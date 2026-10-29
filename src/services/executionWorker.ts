@@ -11,7 +11,7 @@ import {
 } from "../integrations/githubApp";
 import { commentOnWorkItem } from "./ingestionService";
 import { NonRetryableError, describeError } from "../utils/safeError";
-import { runExecutionGraph } from "./agentGraph/executionGraph";
+import { discardExecutionRun, runExecutionGraph } from "./agentGraph/executionGraph";
 import { hashSnapshot, submitPlan } from "./executionService";
 import rabbitMQService from "./rabbitMQService";
 import { describeVerification, publishApprovedDiff } from "./workspaceService";
@@ -77,6 +77,10 @@ export const markExecutionFailed = async (
     },
   });
   if (result.count === 0) return;
+  // No retry is left to resume the run: drop its saved steps and workspace.
+  await discardExecutionRun(executionId).catch((cleanupError) =>
+    console.error(`Cleanup failed for ${executionId}: ${describeError(cleanupError)}`),
+  );
   await appendEvent(executionId, "EXECUTION_FAILED", { stage, reason });
   await notifyTracker(
     executionId,

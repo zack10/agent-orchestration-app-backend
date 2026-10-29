@@ -4,8 +4,8 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { SANDBOX_TOOLS, executeTool } = require("../dist/services/sandbox/tools");
-const { runRecordedTool } = require("../dist/services/sandbox/toolRunner");
+const { REVIEW_TOOLS, SANDBOX_TOOLS, executeTool } = require("../dist/services/sandbox/tools");
+const { json, runRecordedTool } = require("../dist/services/sandbox/toolRunner");
 const { fsRepoFiles, isTestFile, resolveToolchain } = require("../dist/services/toolchain");
 
 /** A throwaway repository: src, an existing test, a protected file, git metadata. */
@@ -43,6 +43,8 @@ const workspace = (t, overrides = {}) => {
     },
     isTestFile: (file) => isTestFile(toolchain, file),
     isBaseFile: (file) => baseFiles.has(file),
+    // Most tests are about other rules: the problem counts as already shown.
+    reproduction: { shown: true, newTest: false },
     ...overrides,
   };
   return { root, ctx, checks, commands };
@@ -53,7 +55,7 @@ const run = (ctx, name, args) => executeTool(ctx, name, args);
 test("every tool definition has a name, description and object schema", () => {
   assert.deepEqual(
     SANDBOX_TOOLS.map((tool) => tool.name),
-    ["list_files", "read_file", "search_code", "edit_file", "run_check", "run_command", "finish"],
+    ["list_files", "read_file", "search_code", "edit_file", "run_check", "run_command", "skip_reproduction", "finish"],
   );
   for (const tool of SANDBOX_TOOLS) {
     assert.ok(tool.description.length > 20, tool.name);
@@ -236,4 +238,112 @@ test("every call is recorded as REQUESTED, RUNNING, then its outcome", async (t)
   assert.deepEqual(edit.statuses, ["REQUESTED", "RUNNING", "DENIED"]);
   assert.deepEqual(edit.policy.protectedPaths, ctx.protectedPaths);
   assert.match(edit.policy.denied, /protected/);
+});
+
+test("recorded JSON replaces NUL characters, which Postgres jsonb rejects", () => {
+  assert.deepEqual(json({ content: "a\u0000b", nested: [{ out: "\u0000" }], n: 1 }), {
+    content: "a�b",
+    nested: [{ out: "�" }],
+    n: 1,
+  });
+});
+
+test("code can change only after a new test has failed, or with a reason to skip that", async (t) => {
+  const { ctx } = workspace(t, { reproduction: { shown: false, newTest: false } });
+  const fix = { path: "src/math.js", oldText: "a - b", newText: "a + b" };
+
+  const first = await run(ctx, "edit_file", fix);
+  assert.equal(first.status, "DENIED");
+  assert.match(first.output, /add a test in a new test file.*see it fail/);
+  // A failing check without a new test proves nothing.
+  await run(ctx, "run_check", { check: "test" });
+  assert.equal((await run(ctx, "edit_file", fix)).status, "DENIED");
+
+  const testFile = { path: "tests/add.test.js", oldText: "", newText: "assert(add(1, 2) === 3)\n" };
+  assert.equal((await run(ctx, "edit_file", testFile)).status, "COMPLETED", "test files can always be written");
+  const failing = await run(ctx, "run_check", { check: "test" });
+  assert.match(failing.output, /The failing test shows the problem/);
+  assert.equal((await run(ctx, "edit_file", fix)).status, "COMPLETED");
+  assert.deepEqual(ctx.reproduction, { shown: true, newTest: true });
+});
+
+test("the reviewer can only read and give a verdict; the implementer cannot give one", async (t) => {
+  const { ctx } = workspace(t);
+  assert.deepEqual(REVIEW_TOOLS.map((tool) => tool.name), ["list_files", "read_file", "search_code", "verdict"]);
+  const review = (name, args) => executeTool(ctx, name, args, REVIEW_TOOLS);
+
+  assert.equal((await review("read_file", { path: "src/math.js" })).status, "COMPLETED");
+  for (const [name, args] of [
+    ["edit_file", { path: "src/math.js", oldText: "a - b", newText: "a + b" }],
+    ["run_command", { command: "touch x" }],
+    ["finish", { status: "done", summary: "s" }],
+  ])
+    assert.match((await review(name, args)).output, /Unknown tool/, name);
+  assert.match(fs.readFileSync(path.join(ctx.root, "src/math.js"), "utf8"), /a - b/);
+
+  const yes = { answer: "yes", evidence: "src/math.js:2" };
+  const allYes = { sourceChanged: yes, newCodeCalled: yes, testsCallExistingCode: yes, exampleWorks: yes };
+  const approved = await review("verdict", { ...allYes, issues: [], summary: "Read callers." });
+  assert.equal(approved.verdict.approved, true);
+  assert.equal(approved.finish.status, "done", "a verdict ends the loop");
+
+  // The reviewer of go/03 found the new function unused and approved anyway: the code decides.
+  const unused = await review("verdict", {
+    ...allYes,
+    newCodeCalled: { answer: "no", evidence: "NextRunOnce is only called by the new tests" },
+    issues: ["  ", "README not updated"],
+    summary: "Approve.",
+  });
+  assert.equal(unused.verdict.approved, false);
+  assert.equal(unused.finish.status, "blocked");
+  assert.deepEqual(unused.verdict.issues, [
+    "Is every name the diff adds used by the existing code the ticket is about? No: NextRunOnce is only called by the new tests",
+    "README not updated",
+  ]);
+  const withIssue = await review("verdict", { ...allYes, issues: ["adds a secret"], summary: "s" });
+  assert.equal(withIssue.verdict.approved, false, "a listed issue rejects even with every answer yes");
+
+  // python/02: good fixes were rejected over a test comment and an unused import.
+  const remarks = await review("verdict", {
+    ...allYes,
+    issues: [],
+    suggestions: ["The test comment says 65.98; the subtotal is 64.98.", " ", "Unused import of to_cents."],
+    summary: "Correct fix.",
+  });
+  assert.equal(remarks.verdict.approved, true, "suggestions never reject");
+  assert.deepEqual(remarks.verdict.suggestions, ["The test comment says 65.98; the subtotal is 64.98.", "Unused import of to_cents."]);
+  assert.deepEqual(approved.verdict.suggestions, [], "suggestions are optional");
+
+  assert.equal((await review("verdict", { ...allYes, issues: [], summary: "x", exampleWorks: { answer: "none added", evidence: "e" } })).status, "FAILED", "answers are per question");
+  assert.equal((await review("verdict", { ...allYes, sourceChanged: { answer: "yes", evidence: " " }, issues: [], summary: "x" })).status, "FAILED", "evidence is required");
+  assert.match((await run(ctx, "verdict", { ...allYes, issues: [], summary: "x" })).output, /Unknown tool/);
+});
+
+test("a run that times out does not open the gate and says the test hangs", async (t) => {
+  const { ctx } = workspace(t, {
+    reproduction: { shown: false, newTest: false },
+    runCommand: async () => ({ exitCode: 137, timedOut: true, output: "" }),
+  });
+  await run(ctx, "edit_file", { path: "tests/add.test.js", oldText: "", newText: "x\n" });
+  const hung = await run(ctx, "run_command", { command: "run tests" });
+  assert.match(hung.output, /your test probably hangs/);
+  assert.equal(ctx.reproduction.shown, false);
+  const denied = await run(ctx, "edit_file", { path: "src/math.js", oldText: "a - b", newText: "a + b" });
+  assert.match(denied.output, /call finish with status blocked/);
+});
+
+test("a passing run does not open the gate; skip_reproduction does, with its reason", async (t) => {
+  const { ctx } = workspace(t, {
+    reproduction: { shown: false, newTest: false },
+    runCommand: async () => ({ exitCode: 0, timedOut: false, output: "ok" }),
+  });
+  await run(ctx, "edit_file", { path: "tests/add.test.js", oldText: "", newText: "x\n" });
+  await run(ctx, "run_command", { command: "run tests" });
+  assert.equal(ctx.reproduction.shown, false);
+
+  assert.equal((await run(ctx, "skip_reproduction", {})).status, "FAILED", "a reason is required");
+  const skipped = await run(ctx, "skip_reproduction", { reason: "Only the README changes." });
+  assert.equal(skipped.status, "COMPLETED");
+  assert.equal(ctx.reproduction.skipped, "Only the README changes.");
+  assert.equal((await run(ctx, "edit_file", { path: "src/dup.js", oldText: "x = 1;\nx = 1;", newText: "x = 1;" })).status, "COMPLETED");
 });

@@ -1,9 +1,9 @@
 import { Prisma } from "@prisma/client";
 import prisma from "../../db";
 import { RepositoryPolicy } from "../agentGraph/repoPolicy";
-import { ToolCall } from "../llm/types";
+import { ToolCall, ToolDefinition } from "../llm/types";
 import { Toolchain, isTestFile, selectChecks } from "../toolchain";
-import { execInSandbox, keepOutputOutOfDiffs, trackedFiles, workspacePath } from "../workspaceService";
+import { changedFiles, execInSandbox, keepOutputOutOfDiffs, trackedFiles, workspacePath } from "../workspaceService";
 import { CHECK_TIMEOUT_MS, ToolContext, ToolOutcome, ToolStatus, executeTool } from "./tools";
 
 // Stored output is capped; the full output already went to the model.
@@ -24,7 +24,11 @@ export interface ToolCallRecorder {
   ): Promise<void>;
 }
 
-const json = (value: unknown) => value as Prisma.InputJsonValue;
+/** Postgres jsonb rejects \u0000, which model arguments and tool output can contain. */
+export const json = (value: unknown) =>
+  JSON.parse(
+    JSON.stringify(value, (_key, item) => (typeof item === "string" ? item.replaceAll("\u0000", "\uFFFD") : item)),
+  ) as Prisma.InputJsonValue;
 
 export const prismaToolCallRecorder = (attemptId: string): ToolCallRecorder => ({
   async create({ name, input, policy }) {
@@ -53,17 +57,19 @@ export const runRecordedTool = async (
   ctx: ToolContext,
   call: ToolCall,
   recorder: ToolCallRecorder,
+  tools?: ToolDefinition[],
 ): Promise<ToolOutcome> => {
   const policy = { protectedPaths: ctx.protectedPaths, checkScripts: ctx.checkScripts };
   const id = await recorder.create({ name: call.name, input: call.arguments, policy });
   await recorder.update(id, { status: "RUNNING", startedAt: new Date() });
-  const outcome = await executeTool(ctx, call.name, call.arguments);
+  const outcome = await executeTool(ctx, call.name, call.arguments, tools);
   await recorder.update(id, {
     status: outcome.status,
     output: {
       text: outcome.output.slice(0, MAX_STORED_OUTPUT_CHARS),
       truncated: outcome.output.length > MAX_STORED_OUTPUT_CHARS,
       ...(outcome.finish ? { finish: outcome.finish } : {}),
+      ...(outcome.verdict ? { verdict: outcome.verdict } : {}),
     },
     // Denials record why, so a run can be audited without the transcript.
     ...(outcome.status === "DENIED" ? { policy: { ...policy, denied: outcome.output } } : {}),
@@ -81,6 +87,8 @@ export const executionToolContext = async (
   const policy = repository.executionPolicy as RepositoryPolicy | null;
   const checks = selectChecks(toolchain, repository.verificationConfig).run;
   const baseFiles = new Set(await trackedFiles(executionId));
+  // An attempt that continues from kept changes already passed the gate.
+  const newTest = (await changedFiles(executionId)).some((file) => isTestFile(toolchain, file) && !baseFiles.has(file));
   return {
     root: workspacePath(executionId),
     protectedPaths: policy?.protectedPaths ?? toolchain.protectedPaths,
@@ -95,5 +103,6 @@ export const executionToolContext = async (
     runCommand: (command, timeoutMs) => execInSandbox(executionId, ["sh", "-c", command], timeoutMs),
     isTestFile: (file) => isTestFile(toolchain, file),
     isBaseFile: (file) => baseFiles.has(file),
+    reproduction: { shown: newTest, newTest },
   };
 };

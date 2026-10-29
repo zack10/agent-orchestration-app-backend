@@ -28,7 +28,36 @@ export interface ToolContext {
   isTestFile: (file: string) => boolean;
   /** Whether a file is tracked at the base commit; new files are not "existing" tests. */
   isBaseFile: (file: string) => boolean;
+  /** Whether the problem was shown before code changed; updated by the tools. */
+  reproduction: Reproduction;
 }
+
+/**
+ * Code (non-test files) may change only once a new test has failed, or the
+ * agent has said why no test can show the ticket's change. Prompts asked for
+ * this and models skipped it; the tools enforce it.
+ */
+export interface Reproduction {
+  /** A check or command failed after a new test file was written. */
+  shown: boolean;
+  /** A new test file was written in this attempt. */
+  newTest: boolean;
+  /** The agent's reason for not showing the problem with a test. */
+  skipped?: string;
+}
+
+/**
+ * How the problem was shown, for the reviewer. run_command can change files
+ * past the gate, so a code change without a failing test is reported as such.
+ */
+export const describeReproduction = (reproduction: Reproduction, codeChanged: boolean) =>
+  reproduction.skipped
+    ? `Skipped by the agent: ${reproduction.skipped}`
+    : reproduction.shown
+      ? "A new test failed before the code changed."
+      : codeChanged
+        ? "Not shown: code outside test files changed without a new test failing first."
+        : "No code outside test files changed.";
 
 export type ToolStatus = "COMPLETED" | "DENIED" | "FAILED";
 
@@ -37,6 +66,18 @@ export interface ToolOutcome {
   output: string;
   /** Set by finish: the agent's own verdict on the run. */
   finish?: { status: "done" | "blocked"; summary: string };
+  /** Set by verdict: the reviewer's decision on the diff. */
+  verdict?: ReviewVerdict;
+}
+
+export interface ReviewVerdict {
+  approved: boolean;
+  issues: string[];
+  summary: string;
+  /** Remarks that do not reject the change, for the person approving it. */
+  suggestions?: string[];
+  /** The reviewer's checklist answers, when it gave them. */
+  checks?: Record<string, { answer: string; evidence: string }>;
 }
 
 const MAX_OUTPUT_CHARS = 20_000;
@@ -103,7 +144,7 @@ export const SANDBOX_TOOLS: ToolDefinition[] = [
   {
     name: "edit_file",
     description:
-      "Replace one exact piece of text in a file. oldText must appear exactly once; include enough surrounding lines to make it unique. To create a new file, pass an empty oldText. Existing test files and protected paths cannot be changed; add new test files instead.",
+      "Replace one exact piece of text in a file. oldText must appear exactly once; include enough surrounding lines to make it unique. To create a new file, pass an empty oldText. Existing test files and protected paths cannot be changed; add new test files instead. Files other than tests can be changed only after a new test you wrote has failed in run_check or run_command, or after skip_reproduction.",
     parameters: {
       type: "object",
       properties: {
@@ -141,6 +182,16 @@ export const SANDBOX_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: "skip_reproduction",
+    description:
+      "Say why no test can show this ticket's change (for example documentation or configuration only), so files other than tests can be changed without a failing test first. The reviewer sees the reason.",
+    parameters: {
+      type: "object",
+      properties: { reason: { type: "string", description: "Why a test cannot show the change" } },
+      required: ["reason"],
+    },
+  },
+  {
     name: "finish",
     description:
       'End the run. Use status "done" when the change is complete, or "blocked" when the ticket cannot or should not be done (unclear, impossible or unsafe); explain why in the summary.',
@@ -154,6 +205,29 @@ export const SANDBOX_TOOLS: ToolDefinition[] = [
     },
   },
 ];
+
+/** The reviewer's checklist (see reviewer prompts); a "no" to any rejects. */
+const REVIEW_CHECKS = {
+  sourceChanged: {
+    question: "Does the diff change the code that produces the wrong behaviour?",
+    other: [] as string[],
+  },
+  newCodeCalled: {
+    question: "Is every name the diff adds used by the existing code the ticket is about?",
+    other: ["none added"],
+  },
+  testsCallExistingCode: {
+    question: "Do the new tests call the existing code the ticket is about?",
+    other: ["no tests"],
+  },
+  exampleWorks: {
+    question: "Does the ticket's example give the expected result with the change?",
+    other: ["no example"],
+  },
+};
+
+const reviewCheck = (other: string[]) =>
+  z.object({ answer: z.enum(["yes", "no", ...other] as [string, ...string[]]), evidence: z.string().trim().min(1) });
 
 const ARGS = {
   list_files: z.object({ path: z.string().optional() }),
@@ -169,7 +243,77 @@ const ARGS = {
     command: z.string().min(1).max(MAX_COMMAND_CHARS),
     timeoutSeconds: z.number().int().positive().max(CHECK_TIMEOUT_MS / 1000).optional(),
   }),
+  skip_reproduction: z.object({ reason: z.string().trim().min(1) }),
   finish: z.object({ status: z.enum(["done", "blocked"]), summary: z.string().min(1) }),
+  verdict: z.object({
+    sourceChanged: reviewCheck(REVIEW_CHECKS.sourceChanged.other),
+    newCodeCalled: reviewCheck(REVIEW_CHECKS.newCodeCalled.other),
+    testsCallExistingCode: reviewCheck(REVIEW_CHECKS.testsCallExistingCode.other),
+    exampleWorks: reviewCheck(REVIEW_CHECKS.exampleWorks.other),
+    issues: z.array(z.string()),
+    suggestions: z.array(z.string()).default([]),
+    summary: z.string().min(1),
+  }),
+};
+
+const READ_ONLY_TOOLS = new Set(["list_files", "read_file", "search_code"]);
+
+/**
+ * The reviewer's tools: reading the changed repository, then one verdict.
+ * executeTool refuses everything else when given this list.
+ */
+export const REVIEW_TOOLS: ToolDefinition[] = [
+  ...SANDBOX_TOOLS.filter((tool) => READ_ONLY_TOOLS.has(tool.name)),
+  {
+    name: "verdict",
+    description:
+      "End the review: answer every checklist item with its evidence and list any other problems. Any \"no\" answer or listed issue rejects the change.",
+    parameters: {
+      type: "object",
+      properties: {
+        ...Object.fromEntries(
+          Object.entries(REVIEW_CHECKS).map(([name, check]) => [
+            name,
+            {
+              type: "object",
+              description: check.question,
+              properties: {
+                answer: { type: "string", enum: ["yes", "no", ...check.other] },
+                evidence: { type: "string", description: "File and line, or the search you ran" },
+              },
+              required: ["answer", "evidence"],
+            },
+          ]),
+        ),
+        issues: {
+          type: "array",
+          items: { type: "string" },
+          description: "Problems that make the change wrong (see the prompt); each rejects it. Empty if none",
+        },
+        suggestions: {
+          type: "array",
+          items: { type: "string" },
+          description: "Other remarks (style, comments, naming, unused inputs); shown to the approver, never reject",
+        },
+        summary: { type: "string", description: "What you checked and what you concluded" },
+      },
+      required: [...Object.keys(REVIEW_CHECKS), "issues", "summary"],
+    },
+  },
+];
+
+/**
+ * Turns the reviewer's answers into the decision, so a reviewer that finds
+ * a problem cannot still approve: any "no" or listed issue rejects.
+ */
+const decideReview = (args: z.infer<typeof ARGS.verdict>): ReviewVerdict => {
+  const { issues, suggestions, summary, ...checks } = args;
+  const failedChecks = Object.entries(checks)
+    .filter(([, check]) => check.answer === "no")
+    .map(([name, check]) => `${REVIEW_CHECKS[name as keyof typeof REVIEW_CHECKS].question} No: ${check.evidence}`);
+  const problems = [...failedChecks, ...issues.map((issue) => issue.trim()).filter(Boolean)];
+  const remarks = suggestions.map((remark) => remark.trim()).filter(Boolean);
+  return { approved: problems.length === 0, issues: problems, suggestions: remarks, summary, checks };
 };
 
 const completed = (output: string): ToolOutcome => ({ status: "COMPLETED", output });
@@ -287,8 +431,13 @@ const editFile = (ctx: ToolContext, args: z.infer<typeof ARGS.edit_file>) => {
     return denied(`"${file}" is protected and cannot be changed. Protected: ${ctx.protectedPaths.join(", ")}.`);
   const exists = fs.existsSync(target.fullPath);
   if (exists && !fs.statSync(target.fullPath).isFile()) return failed(`"${file}" is not a file.`);
-  if (exists && ctx.isTestFile(file) && ctx.isBaseFile(file))
+  const testFile = ctx.isTestFile(file);
+  if (exists && testFile && ctx.isBaseFile(file))
     return denied(`"${file}" is an existing test file and cannot be changed. Add new tests in a new file instead.`);
+  if (!testFile && !ctx.reproduction.shown && !ctx.reproduction.skipped)
+    return denied(
+      "Show the problem before changing code: add a test in a new test file that calls the existing code the ticket is about and expects what the ticket asks for, then run it with run_check or run_command and see it fail. If no test can show this change (for example documentation or configuration only), call skip_reproduction with the reason. If the ticket should not be done at all, call finish with status blocked and the reason.",
+    );
 
   let content: string;
   if (args.oldText === "") {
@@ -312,14 +461,25 @@ const editFile = (ctx: ToolContext, args: z.infer<typeof ARGS.edit_file>) => {
 
   fs.mkdirSync(path.dirname(target.fullPath), { recursive: true });
   fs.writeFileSync(target.fullPath, content);
+  if (testFile) ctx.reproduction.newTest = true;
   return completed(exists ? `Edited ${file}.` : `Created ${file}.`);
+};
+
+/** A failing run after a new test was written opens the gate; says so in the output. A timeout shows nothing. */
+const noteReproduction = (ctx: ToolContext, result: SandboxResult) => {
+  if (ctx.reproduction.shown || !ctx.reproduction.newTest || result.exitCode === 0) return "";
+  if (result.timedOut)
+    return "\n[A run that times out shows nothing about the ticket: your test probably hangs, for example on a server, connection or timer it leaves open. Make the test finish, then run it again.]";
+  ctx.reproduction.shown = true;
+  return "\n[The failing test shows the problem; you can now change the code. Make sure it fails for the reason the ticket describes, then fix the wrong value where it comes from, not only in the code your test calls.]";
 };
 
 const runCheck = async (ctx: ToolContext, args: z.infer<typeof ARGS.run_check>) => {
   if (!ctx.checkScripts.includes(args.check))
     return denied(`"${args.check}" is not an available check. Available: ${ctx.checkScripts.join(", ") || "none"}.`);
   const result = await ctx.runCheck(args.check);
-  return completed(cap(`${args.check} check: ${verdict(result, CHECK_TIMEOUT_MS)}\n${result.output.trim()}`, "tail"));
+  const note = noteReproduction(ctx, result);
+  return completed(cap(`${args.check} check: ${verdict(result, CHECK_TIMEOUT_MS)}\n${result.output.trim()}`, "tail") + note);
 };
 
 const verdict = (result: SandboxResult, timeoutMs: number) =>
@@ -332,7 +492,8 @@ const verdict = (result: SandboxResult, timeoutMs: number) =>
 const runCommand = async (ctx: ToolContext, args: z.infer<typeof ARGS.run_command>) => {
   const timeoutMs = (args.timeoutSeconds ?? CHECK_TIMEOUT_MS / 1000) * 1000;
   const result = await ctx.runCommand(args.command, timeoutMs);
-  return completed(cap(`$ ${args.command}\n${verdict(result, timeoutMs)}\n${result.output.trim()}`, "tail"));
+  const note = noteReproduction(ctx, result);
+  return completed(cap(`$ ${args.command}\n${verdict(result, timeoutMs)}\n${result.output.trim()}`, "tail") + note);
 };
 
 /** Runs one tool call. Unknown tools and invalid arguments are FAILED results. */
@@ -340,8 +501,10 @@ export const executeTool = async (
   ctx: ToolContext,
   name: string,
   rawArgs: Record<string, unknown>,
+  tools: ToolDefinition[] = SANDBOX_TOOLS,
 ): Promise<ToolOutcome> => {
-  if (!(name in ARGS)) return failed(`Unknown tool "${name}". Available: ${Object.keys(ARGS).join(", ")}.`);
+  if (!tools.some((tool) => tool.name === name))
+    return failed(`Unknown tool "${name}". Available: ${tools.map((tool) => tool.name).join(", ")}.`);
   const parsed = ARGS[name as keyof typeof ARGS].safeParse(rawArgs);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
@@ -361,6 +524,18 @@ export const executeTool = async (
         return await runCheck(ctx, parsed.data as z.infer<typeof ARGS.run_check>);
       case "run_command":
         return await runCommand(ctx, parsed.data as z.infer<typeof ARGS.run_command>);
+      case "skip_reproduction":
+        ctx.reproduction.skipped = (parsed.data as z.infer<typeof ARGS.skip_reproduction>).reason;
+        return completed("Noted. You can change files other than tests now; the reviewer will see your reason.");
+      case "verdict": {
+        const verdict = decideReview(parsed.data as z.infer<typeof ARGS.verdict>);
+        // finish ends the loop; the verdict carries the decision.
+        return {
+          ...completed(`Review ${verdict.approved ? "approved" : "rejected"}.`),
+          finish: { status: verdict.approved ? "done" : "blocked", summary: verdict.summary },
+          verdict,
+        };
+      }
       default: {
         const args = parsed.data as z.infer<typeof ARGS.finish>;
         return { ...completed(`Finished (${args.status}).`), finish: args };

@@ -19,7 +19,8 @@ import { hashSnapshot } from "../executionService";
 import { LLMService } from "../llm/LLMService";
 import { ToolRequest } from "../llm/types";
 import { TokenLimitError, prismaUsageLedger } from "../llm/usageLedger";
-import { SANDBOX_TOOLS } from "../sandbox/tools";
+import { DurableCheckpointSaver, prismaCheckpointStore } from "./checkpointer";
+import { REVIEW_TOOLS, ReviewVerdict, SANDBOX_TOOLS, describeReproduction } from "../sandbox/tools";
 import {
   executionToolContext,
   prismaToolCallRecorder,
@@ -80,16 +81,18 @@ type GraphRoute =
   | "verify"
   | "artifact"
   | "skipped"
+  | "proceed"
   | undefined;
 
 const ExecutionGraphState = Annotation.Root({
   executionId: Annotation<string>(),
   baseSha: Annotation<string | undefined>(),
-  githubToken: Annotation<string | undefined>(),
   planTaskId: Annotation<string | undefined>(),
   agentProvider: Annotation<string | undefined>(),
   agentModel: Annotation<string | undefined>(),
   agentApiKey: Annotation<string | undefined>(),
+  /** A separate model for reviewing diffs (agent config.reviewer); the agent's own if unset. */
+  reviewer: Annotation<{ provider: string; model: string; apiKey?: string } | undefined>(),
   ticket: Annotation<string | undefined>(),
   repoContext: Annotation<RepoContext | undefined>(),
   // How the repository is installed and checked, resolved after cloning.
@@ -105,11 +108,6 @@ const ExecutionGraphState = Annotation.Root({
     default: () => "",
   }),
   attemptNumber: Annotation<number>({
-    reducer: (_current, update) => update,
-    default: () => 0,
-  }),
-  // Attempts recorded by earlier (retried) runs of this execution.
-  attemptOffset: Annotation<number>({
     reducer: (_current, update) => update,
     default: () => 0,
   }),
@@ -152,6 +150,13 @@ const ExecutionGraphState = Annotation.Root({
   keepChanges: Annotation<boolean>({
     reducer: (_current, update) => update,
     default: () => false,
+  }),
+  // How the tool loop showed the problem before changing code, for the reviewer.
+  /** The reviewer's non-blocking remarks on the approved diff, shown with it. */
+  reviewSuggestions: Annotation<string[]>({ reducer: (_old, value) => value, default: () => [] }),
+  reproduction: Annotation<string>({
+    reducer: (_current, update) => update,
+    default: () => "Not tracked: the change was made without tools.",
   }),
 });
 
@@ -197,12 +202,23 @@ const askAgentWithTools = (
   });
 };
 
+/** The state with the reviewer's model in place of the agent's, when one is configured. */
+const asReviewer = (state: GraphState): GraphState =>
+  state.reviewer
+    ? {
+        ...state,
+        agentProvider: state.reviewer.provider,
+        agentModel: state.reviewer.model,
+        agentApiKey: state.reviewer.apiKey,
+      }
+    : state;
+
 /** The prompts a mode actually uses, recorded with every run. */
 const promptVersionsFor = (mode: ExecutionAgentMode) => {
-  const { implement, fileFormat, agent, ...shared } = EXECUTION_PROMPTS;
+  const { implement, fileFormat, agent, review, reviewer, ...shared } = EXECUTION_PROMPTS;
   return mode === "tool_loop"
-    ? { ...shared, agent }
-    : { ...shared, implement, fileFormat };
+    ? { ...shared, agent, reviewer }
+    : { ...shared, implement, fileFormat, review };
 };
 
 interface ExecutionBudget {
@@ -407,9 +423,17 @@ const loadExecutionContext = async (
     Date.now() + positive(budget.maxDurationSeconds, 1800) * 1000;
   const attemptShare = Math.min(1, positive(budget.attemptShare, DEFAULT_ATTEMPT_SHARE));
   const resolved = llm.resolveModel(agent);
-  const agentConfig = agent.config as { apiKey?: string } | null;
+  const agentConfig = agent.config as
+    | { apiKey?: string; reviewer?: { provider: string; model: string; apiKey?: string } }
+    | null;
   const agentApiKey = agentConfig?.apiKey
     ? decrypt(agentConfig.apiKey)
+    : undefined;
+  const reviewer = agentConfig?.reviewer
+    ? {
+        ...llm.resolveModel(agentConfig.reviewer),
+        apiKey: agentConfig.reviewer.apiKey ? decrypt(agentConfig.reviewer.apiKey) : undefined,
+      }
     : undefined;
 
   // The repository's configuration or the project's own definition decides
@@ -450,10 +474,6 @@ const loadExecutionContext = async (
     where: { id: execution.id },
     data: { baseSha },
   });
-  const previousAttempts = await prisma.taskAttempt.aggregate({
-    where: { planTaskId: planTask.id },
-    _max: { number: true },
-  });
   await graphEvent(execution.id, "GRAPH_CONTEXT_LOADED", {
     repositoryId: execution.repositoryId,
     workItemId: execution.workItemId,
@@ -461,16 +481,16 @@ const loadExecutionContext = async (
     agentMode,
     budget: { maxSteps, maxTokens, maxDurationSeconds: (deadline - Date.now()) / 1000, attemptShare },
     promptVersions: promptVersionsFor(agentMode),
+    ...(reviewer ? { reviewer: `${reviewer.provider}/${reviewer.model}` } : {}),
   });
 
   return {
     baseSha,
-    githubToken,
     planTaskId: planTask.id,
-    attemptOffset: previousAttempts._max.number ?? 0,
     agentProvider: resolved.provider,
     agentModel: resolved.model,
     agentApiKey,
+    reviewer,
     ticket: `${execution.workItem.title}\n${execution.workItem.description ?? ""}`,
     agentMode,
     maxSteps,
@@ -508,6 +528,33 @@ const inspectRepository = async (state: typeof ExecutionGraphState.State) => {
   return { repoContext };
 };
 
+/**
+ * Whether the ticket should be done at all, asked apart from how: an agent
+ * already planning tends to build something even for a ticket it cannot do.
+ * Only an explicit decline blocks; an unclear reply proceeds to the reviewer.
+ */
+const triageTicket = async (state: typeof ExecutionGraphState.State) => {
+  if (!state.ticket || !state.repoContext) {
+    throw new Error("Execution graph is missing triage context");
+  }
+  const prompt = renderExecutionPrompt("triage", {
+    ticket: state.ticket,
+    environment: state.environment ?? "Unknown.",
+    repoContext: state.repoContext.summary,
+  });
+  const parsed = parseJsonRecord(await askAgent(state, prompt));
+  const declined = parsed.decision === "decline";
+  const reason = String(parsed.reason ?? "No reason given.");
+  await graphEvent(state.executionId, "GRAPH_TICKET_TRIAGED", {
+    decision: declined ? "decline" : "proceed",
+    reason,
+    promptVersion: prompt.version,
+  });
+  return declined
+    ? { lastFailure: `The agent declined the ticket: ${reason}`, route: "blocked" as const }
+    : { route: "proceed" as const };
+};
+
 const planChange = async (state: typeof ExecutionGraphState.State) => {
   if (!state.ticket || !state.repoContext) {
     throw new Error("Execution graph is missing planning context");
@@ -541,10 +588,20 @@ const startAttempt = async (state: GraphState) => {
     throw new Error("Execution graph is missing task context");
   }
   const attemptNumber = state.attemptNumber + 1;
+  // A run that resumes after a crash re-runs the interrupted attempt; the
+  // record it left behind is closed, and numbering continues after it.
+  await prisma.taskAttempt.updateMany({
+    where: { planTaskId: state.planTaskId, status: "RUNNING" },
+    data: { status: "CANCELED", error: "Interrupted; the attempt was run again.", completedAt: new Date() },
+  });
+  const previous = await prisma.taskAttempt.aggregate({
+    where: { planTaskId: state.planTaskId },
+    _max: { number: true },
+  });
   const attempt = await prisma.taskAttempt.create({
     data: {
       planTaskId: state.planTaskId,
-      number: state.attemptOffset + attemptNumber,
+      number: (previous._max.number ?? 0) + 1,
       workspaceId: state.executionId,
     },
   });
@@ -600,8 +657,9 @@ const implementChange = async (state: GraphState) => {
   }
 
   // Each attempt starts from the base commit, so a retry never builds on a
-  // failed attempt's edits (and files it added don't linger).
-  if (attemptNumber > 1) await resetWorkspace(state.executionId);
+  // failed attempt's edits (and files it added don't linger), nor an attempt
+  // re-run after a crash on its own partial edits.
+  await resetWorkspace(state.executionId);
   writeActionsToRoot(
     parsed.actions,
     path.resolve(config.workspaceRoot, state.executionId),
@@ -643,7 +701,7 @@ const agentLoop = async (state: GraphState) => {
   const { attempt, attemptNumber, ticket } = await startAttempt(state);
   // Each attempt starts from the base commit, as in single-shot mode, unless
   // the last one was only stopped by its share of the budget.
-  if (attemptNumber > 1 && !state.keepChanges) await resetWorkspace(state.executionId);
+  if (!state.keepChanges) await resetWorkspace(state.executionId);
 
   const execution = await prisma.execution.findUniqueOrThrow({
     where: { id: state.executionId },
@@ -749,8 +807,11 @@ const agentLoop = async (state: GraphState) => {
   let failure: string;
   let keepChanges = false;
   if (outcome.stopReason === "done") {
-    if (changed.length > 0)
-      return { attemptNumber, attemptId: attempt.id, attemptLog, keepChanges, route: "implemented" as GraphRoute };
+    if (changed.length > 0) {
+      const codeChanged = changed.some((file) => !isTestFile(toolchain, file));
+      const reproduction = describeReproduction(ctx.reproduction, codeChanged);
+      return { attemptNumber, attemptId: attempt.id, attemptLog, keepChanges, reproduction, route: "implemented" as GraphRoute };
+    }
     failure = `The agent called finish without changing any files: ${outcome.summary}`;
   } else if ((outcome.stopReason === "max_tokens" || outcome.stopReason === "timeout") && !executionSpent) {
     // Stopped part-way, not wrong: the next attempt continues from these
@@ -894,6 +955,79 @@ const analyzeFailure = async (state: typeof ExecutionGraphState.State) => {
   return { lastFailure: guidance };
 };
 
+// The reviewer reads callers and the code the ticket is about; a few
+// searches and reads per changed file fit comfortably.
+const REVIEW_MAX_STEPS = 15;
+// Its own cap, so a wandering review cannot spend the attempt's budget.
+const REVIEW_MAX_TOKENS = 40_000;
+// Reviews are short: keep every read in full so files are not read twice.
+const REVIEW_KEEP_RESULTS = REVIEW_MAX_STEPS;
+const VERDICT_TOOL = REVIEW_TOOLS.filter((tool) => tool.name === "verdict");
+const REVIEW_REMINDERS = {
+  nudge: "Continue by calling a tool. When you have decided, call verdict.",
+  budgetWarning: (used: string) =>
+    `[Budget: ${used}. Call verdict now with what you have found; without a verdict the change is rejected.]`,
+};
+
+/**
+ * A short read-only agent loop over the changed repository that ends with
+ * the verdict tool. It fails closed: no verdict is a rejection.
+ */
+const reviewWithTools = async (state: GraphState, prompt: RenderedPrompt): Promise<ReviewVerdict> => {
+  if (!state.attemptId) throw new Error("Execution graph is missing attempt");
+  const execution = await prisma.execution.findUniqueOrThrow({
+    where: { id: state.executionId },
+    include: { repository: true },
+  });
+  const ctx = await executionToolContext(state.executionId, execution.repository, requireToolchain(state));
+  const recorder = prismaToolCallRecorder(state.attemptId);
+  let verdict: ReviewVerdict | undefined;
+  const outcome = await runAgentLoop(
+    {
+      system: prompt.system,
+      task: prompt.user,
+      tools: REVIEW_TOOLS,
+      budget: {
+        maxSteps: REVIEW_MAX_STEPS,
+        maxTokens: Math.min(REVIEW_MAX_TOKENS, Math.max(0, state.maxTokens - (await executionTokensUsed(state)))),
+        deadline: state.deadline,
+      },
+      reminders: REVIEW_REMINDERS,
+      finalTools: VERDICT_TOOL,
+      keepRecentResults: REVIEW_KEEP_RESULTS,
+    },
+    {
+      generate: (request) => askAgentWithTools(asReviewer(state), request, prompt.version),
+      runTool: async (call) => {
+        const result = await runRecordedTool(ctx, call, recorder, REVIEW_TOOLS);
+        verdict ??= result.verdict;
+        return result;
+      },
+      onStep: (step) =>
+        graphEvent(state.executionId, "GRAPH_REVIEW_STEP", {
+          attemptId: state.attemptId,
+          step: step.step,
+          promptVersion: prompt.version,
+          text: step.text.slice(0, MAX_EVENT_TEXT_CHARS),
+          usage: step.usage,
+          toolCalls: step.toolCalls.map(({ call, outcome: result }) => ({
+            name: call.name,
+            status: result.status,
+            input: JSON.stringify(call.arguments).slice(0, MAX_EVENT_PREVIEW_CHARS),
+            output: result.output.slice(0, MAX_EVENT_PREVIEW_CHARS),
+          })),
+        }),
+    },
+  );
+  return (
+    verdict ?? {
+      approved: false,
+      issues: [`The reviewer did not reach a verdict: ${outcome.summary}`],
+      summary: outcome.summary,
+    }
+  );
+};
+
 const reviewDiff = async (state: typeof ExecutionGraphState.State) => {
   if (!state.attemptId) throw new Error("Execution graph is missing attempt");
 
@@ -916,18 +1050,32 @@ const reviewDiff = async (state: typeof ExecutionGraphState.State) => {
     };
   }
 
-  const prompt = renderExecutionPrompt("review", {
+  const reviewInput = {
     ticket: state.ticket ?? "",
     internalPlan: state.internalPlan,
     changedFiles: files.join("\n"),
     diff: diff.slice(0, 80_000),
-  });
-  const raw = await askAgent(state, prompt);
-  const parsed = parseJsonRecord(raw);
-  const approved = parsed.approved === true;
-  const issues = Array.isArray(parsed.issues)
-    ? parsed.issues.map(String)
-    : ["Diff reviewer did not approve the change."];
+    reproduction: state.reproduction,
+  };
+  let prompt: RenderedPrompt;
+  let review: ReviewVerdict;
+  if (state.agentMode === "tool_loop") {
+    prompt = renderExecutionPrompt("reviewer", reviewInput);
+    review = await reviewWithTools(state, prompt);
+  } else {
+    prompt = renderExecutionPrompt("review", reviewInput);
+    const parsed = parseJsonRecord(await askAgent(asReviewer(state), prompt));
+    review = {
+      approved: parsed.approved === true,
+      issues: Array.isArray(parsed.issues)
+        ? parsed.issues.map(String)
+        : ["Diff reviewer did not approve the change."],
+      summary: String(parsed.summary ?? "Diff reviewer approved the change."),
+    };
+  }
+  const { approved, issues } = review;
+  // A rejection with no issue listed still needs feedback for the next attempt.
+  if (!approved && issues.length === 0) issues.push(review.summary);
 
   if (!approved) {
     const feedback = issues.join("\n");
@@ -938,6 +1086,8 @@ const reviewDiff = async (state: typeof ExecutionGraphState.State) => {
     await graphEvent(state.executionId, "GRAPH_DIFF_REVIEW_FAILED", {
       attemptId: state.attemptId,
       issues,
+      suggestions: review.suggestions ?? [],
+      checks: review.checks,
       promptVersion: prompt.version,
     });
     return {
@@ -948,10 +1098,12 @@ const reviewDiff = async (state: typeof ExecutionGraphState.State) => {
 
   await graphEvent(state.executionId, "GRAPH_DIFF_REVIEW_PASSED", {
     attemptId: state.attemptId,
-    summary: parsed.summary ?? "Diff reviewer approved the change.",
+    summary: review.summary,
+    suggestions: review.suggestions ?? [],
+    checks: review.checks,
     promptVersion: prompt.version,
   });
-  return { route: "artifact" };
+  return { route: "artifact" as GraphRoute, reviewSuggestions: review.suggestions ?? [] };
 };
 
 const blockExecution = async (state: typeof ExecutionGraphState.State) => {
@@ -1001,6 +1153,7 @@ const createDiffArtifact = async (state: typeof ExecutionGraphState.State) => {
         metadata: {
           ...state.verification,
           ...(state.environmentProposal ? { environmentProposal: state.environmentProposal } : {}),
+          ...(state.reviewSuggestions.length ? { reviewSuggestions: state.reviewSuggestions } : {}),
         } as unknown as Prisma.InputJsonObject,
       },
     }),
@@ -1035,9 +1188,12 @@ const implementNode = (state: GraphState) =>
 const routeAfterFailure = (state: GraphState) =>
   canRetry(state) ? implementNode(state) : "blocked";
 
+const checkpointer = new DurableCheckpointSaver(prismaCheckpointStore);
+
 const graph = new StateGraph(ExecutionGraphState)
   .addNode("load_context", loadExecutionContext)
   .addNode("inspect_repo", inspectRepository)
+  .addNode("triage_ticket", triageTicket)
   .addNode("plan_change", planChange)
   .addNode("implement_change", implementChange)
   .addNode("agent_loop", agentLoop)
@@ -1049,7 +1205,11 @@ const graph = new StateGraph(ExecutionGraphState)
   .addNode("create_diff_artifact", createDiffArtifact)
   .addEdge(START, "load_context")
   .addEdge("load_context", "inspect_repo")
-  .addEdge("inspect_repo", "plan_change")
+  .addEdge("inspect_repo", "triage_ticket")
+  .addConditionalEdges("triage_ticket", routeAfterVerification, {
+    proceed: "plan_change",
+    blocked: "block_execution",
+  })
   .addConditionalEdges("plan_change", implementNode, {
     implement_change: "implement_change",
     agent_loop: "agent_loop",
@@ -1086,15 +1246,43 @@ const graph = new StateGraph(ExecutionGraphState)
   })
   .addEdge("block_execution", END)
   .addEdge("create_diff_artifact", END)
-  .compile();
+  .compile({ checkpointer });
 
+const workspaceExists = async (executionId: string) =>
+  fs.access(path.join(workspacePath(executionId), ".git")).then(
+    () => true,
+    () => false,
+  );
+
+/**
+ * Runs an execution's graph, or resumes it. Each finished step is saved, so
+ * a run that failed (and is redelivered) or whose worker died continues from
+ * the step that did not finish, with the workspace as that step left it,
+ * instead of cloning, setting up, planning and repeating attempts again.
+ * Without a saved step or the workspace (another machine), it starts over.
+ */
 export const runExecutionGraph = async (executionId: string) => {
-  try {
-    await graph.invoke({ executionId });
-  } finally {
-    // The approved diff is stored under ARTIFACT_ROOT and publishing uses a
-    // fresh clone, so the verification workspace is not needed afterwards.
-    // A retried run re-clones from scratch.
-    if (!config.keepWorkspaces) await removeWorkspace(executionId);
+  const thread = { configurable: { thread_id: executionId } };
+  // Another worker may have advanced the stored copy since this one ran it.
+  checkpointer.evict(executionId);
+  const saved = await graph.getState(thread);
+  const resume = saved.next.length > 0 && (await workspaceExists(executionId));
+  if (resume) {
+    await graphEvent(executionId, "GRAPH_RESUMED", { next: saved.next });
+  } else {
+    await checkpointer.deleteThread(executionId);
+    // A clone left by a run that cannot be resumed is set up afresh.
+    await removeWorkspace(executionId);
   }
+  await graph.invoke(resume ? null : { executionId }, thread);
+  // Finished (artifact or blocked): the approved diff is stored under
+  // ARTIFACT_ROOT and publishing uses a fresh clone. On failure both are
+  // kept for the retry; discardExecutionRun removes them once none is left.
+  await discardExecutionRun(executionId);
+};
+
+/** Removes what a run keeps for resuming: its saved steps and its workspace. */
+export const discardExecutionRun = async (executionId: string) => {
+  await checkpointer.deleteThread(executionId);
+  if (!config.keepWorkspaces) await removeWorkspace(executionId);
 };

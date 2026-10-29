@@ -11,11 +11,22 @@ const providerKey = z
   });
 
 // Agent schemas
+// config is free-form; the parts the server reads are checked.
+const agentConfig = z
+  .object({
+    // A separate model for reviewing diffs; default the agent's own.
+    reviewer: z
+      .object({ provider: providerKey, model: z.string().min(1), apiKey: z.string().min(1).optional() })
+      .strict()
+      .optional(),
+  })
+  .passthrough();
+
 export const createAgentSchema = z.object({
   body: z.object({
     name: z.string().min(1, "Name is required"),
     description: z.string().optional(),
-    config: z.record(z.unknown()).optional(),
+    config: agentConfig.optional(),
     projectId: uuid.optional(),
     provider: providerKey.optional(),
     model: z.string().min(1).optional(),
@@ -28,7 +39,7 @@ export const updateAgentSchema = z.object({
   body: z.object({
     name: z.string().min(1).optional(),
     description: z.string().optional(),
-    config: z.record(z.unknown()).optional(),
+    config: agentConfig.optional(),
     projectId: uuid.optional(),
     provider: providerKey.optional(),
     model: z.string().min(1).optional(),

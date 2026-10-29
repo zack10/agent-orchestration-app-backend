@@ -25,3 +25,15 @@ test("approval snapshot hashes are deterministic and content-bound", () => {
   assert.equal(hashSnapshot({ diff: "a" }), hashSnapshot({ diff: "a" }));
   assert.notEqual(hashSnapshot({ diff: "a" }), hashSnapshot({ diff: "b" }));
 });
+
+test("the agent's and the reviewer's API keys are encrypted and redacted", () => {
+  const { protectAgentConfig, redactAgent } = require("../dist/utils/agentConfig");
+  const { decrypt } = require("../dist/utils/crypto");
+  const config = protectAgentConfig({
+    apiKey: "agent-key",
+    reviewer: { provider: "openai", model: "gpt-5", apiKey: "reviewer-key" },
+  });
+  assert.equal(/agent-key|reviewer-key/.test(JSON.stringify(config)), false);
+  assert.equal(decrypt(config.reviewer.apiKey), "reviewer-key");
+  assert.deepEqual(redactAgent({ id: "1", config }).config, { reviewer: { provider: "openai", model: "gpt-5" } });
+});

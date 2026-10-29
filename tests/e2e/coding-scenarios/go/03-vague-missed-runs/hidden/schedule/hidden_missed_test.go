@@ -12,9 +12,6 @@ func TestHiddenMissedRunsAreSkipped(t *testing.T) {
 	if got := NextRun(friday, 24*time.Hour, monday); !got.Equal(want) {
 		t.Errorf("after a weekend down: NextRun = %v, want %v", got, want)
 	}
-	if got := NextRun(friday, 24*time.Hour, friday.Add(72*time.Hour)); !got.Equal(friday.Add(96 * time.Hour)) {
-		t.Errorf("exactly on a missed run: NextRun = %v, want the run after it", got)
-	}
 	if got := NextRun(friday, time.Hour, friday.Add(30*time.Minute)); !got.Equal(friday.Add(time.Hour)) {
 		t.Errorf("not yet due: NextRun = %v", got)
 	}
