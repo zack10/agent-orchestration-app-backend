@@ -14,7 +14,7 @@ import { NonRetryableError, describeError } from "../utils/safeError";
 import { discardExecutionRun, runExecutionGraph } from "./agentGraph/executionGraph";
 import { hashSnapshot, submitPlan } from "./executionService";
 import rabbitMQService from "./rabbitMQService";
-import { describeVerification, publishApprovedDiff } from "./workspaceService";
+import { describeReviewObjections, describeVerification, publishApprovedDiff } from "./workspaceService";
 
 const TERMINAL: ExecutionStatus[] = ["COMPLETED", "BLOCKED", "FAILED", "CANCELED"];
 const RUN_STATES: ExecutionStatus[] = ["RUNNING", "VERIFYING"];
@@ -202,6 +202,17 @@ const run = async (executionId: string) => {
       executionId,
       `Execution ${executionId} is blocked after verification failures. Review the execution evidence.`,
     );
+  }
+  if (execution?.status === "AWAITING_PUBLISH_APPROVAL") {
+    // The approver decides on a change the reviewer objected to, so tell them where they look.
+    const diff = await prisma.artifact.findFirst({
+      where: { executionId, type: "DIFF" },
+      orderBy: { createdAt: "desc" },
+      select: { metadata: true },
+    });
+    const objections = describeReviewObjections(diff?.metadata);
+    if (objections)
+      await notifyTracker(executionId, `Execution ${executionId} is awaiting publish approval.\n\n${objections}`);
   }
 };
 

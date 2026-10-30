@@ -562,6 +562,16 @@ export const verifyWorkspace = async (
   return { passed: !failed, checksRun: checks.run.length, results };
 };
 /** What a verification proved, for the PR body: which checks passed, and which did not exist. */
+/** The reviewer's unresolved objections to a change, for whoever decides on it; "" when there are none. */
+export const describeReviewObjections = (verification: unknown) => {
+  const { reviewObjections } = (verification ?? {}) as { reviewObjections?: string[] };
+  if (!reviewObjections?.length) return "";
+  return [
+    "**The reviewer objected to this change.** The checks pass, but the reviewer still objected after the last attempt. Check these points before approving:",
+    ...reviewObjections.map((objection) => `- ${objection.replace(/\s+/g, " ").trim()}`),
+  ].join("\n");
+};
+
 export const describeVerification = (verification: unknown) => {
   const { checksRun, results } = (verification ?? {}) as {
     checksRun?: number;
@@ -569,8 +579,10 @@ export const describeVerification = (verification: unknown) => {
   };
   const ran = (results ?? []).filter((result) => !result.unavailable).map((result) => result.script);
   const unavailable = (results ?? []).filter((result) => result.unavailable).map((result) => result.script);
+  const objections = describeReviewObjections(verification);
   // Artifacts from before toolchains have results but no checksRun.
   const lines = [
+    ...(objections ? [objections, ""] : []),
     !(checksRun ?? ran.length)
       ? "**Unverified:** no checks are available for this repository, so nothing was run against this change."
       : `Checks passed: ${ran.join(", ")}.`,

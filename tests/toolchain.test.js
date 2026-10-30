@@ -161,6 +161,15 @@ test("the PR body says which checks ran, and when none did", () => {
     /^Checks passed: test\./,
     "artifacts from before toolchains",
   );
+
+  const objected = describeVerification({
+    checksRun: 1,
+    results: [{ script: "test", passed: true, output: "" }],
+    reviewObjections: ["NextRun is\n unchanged"],
+  });
+  assert.match(objected, /^\*\*The reviewer objected to this change\.\*\*/, "objections come first");
+  assert.match(objected, /^- NextRun is unchanged$/m);
+  assert.match(objected, /Checks passed: test\./);
 });
 
 test("environment snapshots are cached per repository and per environment", () => {

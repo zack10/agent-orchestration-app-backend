@@ -50,6 +50,7 @@ const REPORT_DIR = path.resolve(__dirname, "..", "..", "docs", "testing");
 const OUTCOMES = {
   correct_fix: "Correct fix",
   wrong_fix_shipped: "Wrong fix shipped",
+  wrong_fix_flagged: "Wrong fix, reviewer objected",
   correctly_blocked: "Correctly blocked",
   no_fix: "No fix (blocked)",
   infra_failure: "Infrastructure failure",
@@ -221,6 +222,8 @@ const runScenario = async (fixtures, scenario, runNumber) => {
         }
       }
       if (objected) result.note = [result.note, objected].filter(Boolean).join("; ");
+      // The approver was warned, so it is not a silent wrong fix.
+      if (objected && result.outcome === "wrong_fix_shipped") result.outcome = "wrong_fix_flagged";
     } else if (execution.status === "BLOCKED") {
       result.outcome = scenario.expect === "blocked" ? "correctly_blocked" : "no_fix";
       result.note = (execution.lastError ?? "").replace(/\s+/g, " ").slice(0, 200);
@@ -273,6 +276,7 @@ const summarize = (results) => {
     runs: results.length,
     correct: count("correct_fix"),
     wrong: count("wrong_fix_shipped"),
+    flagged: count("wrong_fix_flagged"),
     blocked: count("correctly_blocked"),
     noFix: count("no_fix"),
     infra: count("infra_failure"),
@@ -313,19 +317,19 @@ const writeReport = (results, meta) => {
     "",
     "## Summary",
     "",
-    "Rates exclude infrastructure failures. **Wrong fix shipped** is the key number: a PR a human reviewer would have to catch.",
+    "Rates exclude infrastructure failures. **Wrong fix shipped** is the key number: a PR a human reviewer would have to catch with no warning. **Wrong fix, reviewer objected** reached publish approval with the reviewer's objections shown to the approver.",
     "",
-    "| Runs | Correct fix | Wrong fix shipped | Correctly blocked | No fix (blocked) | Infra failures | Pass rate | Wrong-fix-shipped rate | Avg attempts |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    `| ${summary.runs} | ${summary.correct} | ${summary.wrong} | ${summary.blocked} | ${summary.noFix} | ${summary.infra} | ${percent(summary.correct + summary.blocked, summary.graded)} | ${percent(summary.wrong, summary.graded)} | ${summary.avgAttempts} |`,
+    "| Runs | Correct fix | Wrong fix shipped | Wrong fix, reviewer objected | Correctly blocked | No fix (blocked) | Infra failures | Pass rate | Wrong-fix-shipped rate | Avg attempts |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    `| ${summary.runs} | ${summary.correct} | ${summary.wrong} | ${summary.flagged} | ${summary.blocked} | ${summary.noFix} | ${summary.infra} | ${percent(summary.correct + summary.blocked, summary.graded)} | ${percent(summary.wrong, summary.graded)} | ${summary.avgAttempts} |`,
     "",
     "By language:",
     "",
-    "| Language | Runs | Correct fix | Wrong fix shipped | Correctly blocked | No fix (blocked) | Infra failures |",
-    "| --- | --- | --- | --- | --- | --- | --- |",
+    "| Language | Runs | Correct fix | Wrong fix shipped | Wrong fix, reviewer objected | Correctly blocked | No fix (blocked) | Infra failures |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ...[...new Set(results.map((result) => result.language))].map((language) => {
       const own = summarize(results.filter((result) => result.language === language));
-      return `| ${language} | ${own.runs} | ${own.correct} | ${own.wrong} | ${own.blocked} | ${own.noFix} | ${own.infra} |`;
+      return `| ${language} | ${own.runs} | ${own.correct} | ${own.wrong} | ${own.flagged} | ${own.blocked} | ${own.noFix} | ${own.infra} |`;
     }),
     "",
     "## Runs",
@@ -404,7 +408,7 @@ const main = async () => {
   });
   const { summary } = report;
   log(
-    `done: ${summary.correct} correct, ${summary.wrong} wrong fix shipped, ${summary.blocked} correctly blocked, ` +
+    `done: ${summary.correct} correct, ${summary.wrong} wrong fix shipped, ${summary.flagged} wrong fix with reviewer objections, ${summary.blocked} correctly blocked, ` +
       `${summary.noFix} no fix, ${summary.infra} infra failures`,
   );
   log(`report: ${path.relative(process.cwd(), report.file)}`);
