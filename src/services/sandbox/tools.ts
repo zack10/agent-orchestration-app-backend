@@ -32,6 +32,8 @@ export interface ToolContext {
   reproduction: Reproduction;
   /** The repository's output limits; TOOL_OUTPUT_DEFAULTS where unset. */
   limits?: Partial<ToolOutputLimits>;
+  /** Checks that failed on the unmodified code, with the end of that output. */
+  failingBefore?: Record<string, string>;
 }
 
 export interface ToolOutputLimits {
@@ -495,7 +497,12 @@ const runCheck = async (ctx: ToolContext, args: z.infer<typeof ARGS.run_check>) 
   if (!ctx.checkScripts.includes(args.check))
     return denied(`"${args.check}" is not an available check. Available: ${ctx.checkScripts.join(", ") || "none"}.`);
   const result = await ctx.runCheck(args.check);
-  const note = noteReproduction(ctx, result);
+  const before = ctx.failingBefore?.[args.check];
+  const note =
+    noteReproduction(ctx, result) +
+    (before === undefined
+      ? ""
+      : `\n[This check already failed before your change, on the unmodified code. Only failures that were not there before come from your change. The end of that earlier output:]\n${before.slice(-1500)}`);
   return completed(cap(ctx, `${args.check} check: ${verdict(result, CHECK_TIMEOUT_MS)}\n${result.output.trim()}`, "ends") + note);
 };
 

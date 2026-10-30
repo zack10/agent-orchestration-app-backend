@@ -518,11 +518,16 @@ export interface CheckResult {
   output: string;
   /** Configured, but the toolchain has no command for it. */
   unavailable?: true;
+  /** Failed on the unmodified code too, so its failure does not block the change. */
+  failingBefore?: true;
 }
 
 /**
  * Runs the toolchain's checks in its image, without network, stopping at
- * the first failure. A configured check that doesn't exist is recorded as
+ * the first failure. A check in `failingBefore` failed on the unmodified
+ * code, so failing again doesn't block: established agents report a test
+ * that was already broken instead of refusing the change, and a person
+ * decides. It is recorded, and the next check still runs. A configured check that doesn't exist is recorded as
  * unavailable and does not fail the verification: it says nothing about
  * the change.
  */
@@ -530,6 +535,7 @@ export const verifyWorkspace = async (
   id: string,
   toolchain: Toolchain,
   checks: { run: Array<{ name: string; command: string[] }>; unavailable: string[] },
+  failingBefore: string[] = [],
 ) => {
   const results: CheckResult[] = checks.unavailable.map((script) => ({
     script,
@@ -555,13 +561,16 @@ export const verifyWorkspace = async (
       });
     } catch (error) {
       const output = error instanceof Error ? error.message : String(error);
+      if (failingBefore.includes(name)) {
+        results.push({ script: name, passed: false, failingBefore: true, output });
+        continue;
+      }
       results.push({ script: name, passed: false, output });
       failed = true;
       break;
     }
   return { passed: !failed, checksRun: checks.run.length, results };
 };
-/** What a verification proved, for the PR body: which checks passed, and which did not exist. */
 /** The reviewer's unresolved objections to a change, for whoever decides on it; "" when there are none. */
 export const describeReviewObjections = (verification: unknown) => {
   const { reviewObjections } = (verification ?? {}) as { reviewObjections?: string[] };
@@ -572,20 +581,34 @@ export const describeReviewObjections = (verification: unknown) => {
   ].join("\n");
 };
 
+/** Checks that failed before the change and still fail, for whoever decides on it; "" when there are none. */
+export const describeFailingBefore = (verification: unknown) => {
+  const { results } = (verification ?? {}) as { results?: CheckResult[] };
+  const names = (results ?? []).filter((result) => result.failingBefore).map((result) => result.script);
+  if (!names.length) return "";
+  return `**Already failing before this change:** ${names.join(", ")}. ${names.length > 1 ? "They" : "It"} failed on the unmodified code too, so ${names.length > 1 ? "they" : "it"} could not show whether this change breaks something ${names.length > 1 ? "they cover" : "it covers"}. Check the output before approving.`;
+};
+
+/** What a verification proved, for the PR body: which checks passed, which already failed, and which did not exist. */
 export const describeVerification = (verification: unknown) => {
   const { checksRun, results } = (verification ?? {}) as {
     checksRun?: number;
     results?: CheckResult[];
   };
   const ran = (results ?? []).filter((result) => !result.unavailable).map((result) => result.script);
+  const passed = (results ?? []).filter((result) => !result.unavailable && !result.failingBefore).map((result) => result.script);
   const unavailable = (results ?? []).filter((result) => result.unavailable).map((result) => result.script);
   const objections = describeReviewObjections(verification);
+  const failing = describeFailingBefore(verification);
   // Artifacts from before toolchains have results but no checksRun.
   const lines = [
     ...(objections ? [objections, ""] : []),
     !(checksRun ?? ran.length)
       ? "**Unverified:** no checks are available for this repository, so nothing was run against this change."
-      : `Checks passed: ${ran.join(", ")}.`,
+      : passed.length
+        ? `Checks passed: ${passed.join(", ")}.`
+        : "No check passed.",
+    ...(failing ? [failing] : []),
   ];
   if (unavailable.length) lines.push(`Not available in this repository: ${unavailable.join(", ")}.`);
   const { environmentProposal: proposal } = (verification ?? {}) as {

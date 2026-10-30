@@ -83,6 +83,7 @@ export const executionToolContext = async (
   executionId: string,
   repository: { executionPolicy: unknown; verificationConfig: unknown },
   toolchain: Toolchain,
+  failingBefore: Record<string, string> = {},
 ): Promise<ToolContext> => {
   const policy = repository.executionPolicy as RepositoryPolicy | null;
   const checks = selectChecks(toolchain, repository.verificationConfig).run;
@@ -105,5 +106,6 @@ export const executionToolContext = async (
     isBaseFile: (file) => baseFiles.has(file),
     reproduction: { shown: newTest, newTest },
     limits: { maxOutputChars: policy?.maxToolOutputChars, maxReadLines: policy?.maxReadLines },
+    failingBefore,
   };
 };

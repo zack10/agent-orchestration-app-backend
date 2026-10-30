@@ -106,6 +106,8 @@ const ExecutionGraphState = Annotation.Root({
   toolchain: Annotation<Toolchain | undefined>(),
   // What setup installed inside the workspace, restored before verification.
   setupOutputs: Annotation<string[]>({ reducer: (_old, value) => value, default: () => [] }),
+  // Checks that failed on the unmodified code (the baseline), with the end of their output.
+  failingBefore: Annotation<Record<string, string>>({ reducer: (_old, value) => value, default: () => ({}) }),
   // Set when the run uses an environment the agent proposed and nobody approved yet.
   environmentProposal: Annotation<ProposedEnvironment | undefined>(),
   // The environment as the prompts describe it (image, checks and their commands).
@@ -490,6 +492,9 @@ const loadExecutionContext = async (
     ask,
   );
   // Failures here existed before the agent changed anything.
+  const failingBefore = Object.fromEntries(
+    setup.baseline.filter((result) => !result.passed).map((result) => [result.check, result.output.slice(-2000)]),
+  );
   await graphEvent(execution.id, "GRAPH_BASELINE_CHECKED", {
     results: setup.baseline.map(({ check, passed }) => ({ check, passed })),
     failing: setup.baseline.filter((result) => !result.passed).map((result) => result.check),
@@ -529,11 +534,13 @@ const loadExecutionContext = async (
     attemptShare,
     toolchain,
     setupOutputs: setup.setupOutputs,
+    failingBefore,
     environmentProposal,
     environment: describeEnvironment(
       toolchain,
       selectChecks(toolchain, execution.repository.verificationConfig).run,
       agentMode === "tool_loop",
+      Object.keys(failingBefore),
     ),
   };
 };
@@ -738,7 +745,7 @@ const agentLoop = async (state: GraphState) => {
     include: { repository: true },
   });
   const toolchain = requireToolchain(state);
-  const ctx = await executionToolContext(state.executionId, execution.repository, toolchain);
+  const ctx = await executionToolContext(state.executionId, execution.repository, toolchain, state.failingBefore);
   const recorder = prismaToolCallRecorder(attempt.id);
   const prompt = renderExecutionPrompt("agent", {
     ticket,
@@ -925,6 +932,7 @@ const verifyChange = async (state: typeof ExecutionGraphState.State) => {
     state.executionId,
     toolchain,
     selectChecks(toolchain, execution.repository.verificationConfig),
+    Object.keys(state.failingBefore),
   );
 
   if (!verification.passed) {
@@ -950,6 +958,7 @@ const verifyChange = async (state: typeof ExecutionGraphState.State) => {
     attemptNumber: state.attemptNumber,
     checksRun: verification.checksRun,
     unavailable: verification.results.filter((result) => result.unavailable).map((result) => result.script),
+    failingBefore: verification.results.filter((result) => result.failingBefore).map((result) => result.script),
     unverified: verification.checksRun === 0,
   });
   return { verification, route: "review" };

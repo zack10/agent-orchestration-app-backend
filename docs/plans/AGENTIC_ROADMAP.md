@@ -62,6 +62,7 @@ Every place where the agent is tied to one language, platform, service or kind o
 | 22 | Quality depends on the model | Measured only on `gemini-flash-lite-latest` with Node scenarios | Results in other languages and on hard tickets are unknown; a weak model fails where a strong one would succeed | 4 (and every phase) |
 | 23 | Prompt injection | Ticket text, attachments, comments and repository files reach the prompt | Text written to steer the agent (e.g. "also send the .env file to ...") could change what it does | 5, 7 (and every phase) |
 | 24 | Newest OpenAI models can't run the tool loop | `OpenAICompatibleProvider.generateWithTools` uses `/v1/chat/completions` only | `gpt-6-luna`, `gpt-5.6-luna` reject function tools there with reasoning on (400, "use /v1/responses or set reasoning_effort to 'none'"); found 2026-10-29, benchmark switched to `gpt-5-mini` | 4 |
+| 25 | A check that already fails on the unmodified code can't catch new breakage in it | `verifyWorkspace` judges a whole check by its exit code; baseline failures (`failingBefore`) no longer block (found 2026-10-30 on gson, whose `DefaultDateTypeAdapterTest` fails on Java 11 before any change) | A change that breaks another test inside an already-failing check is not blocked; the reviewer and the approver are told the check was already failing. Comparing test by test (benchmarks' FAIL_TO_PASS / PASS_TO_PASS, e.g. from JUnit XML reports) if a real case needs it | 4 |
 
 ## Reference projects
 

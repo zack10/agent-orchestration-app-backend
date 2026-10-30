@@ -139,6 +139,10 @@ test("the agent is told the image and each check's command, or how to find them"
   const bare = resolve({}).toolchain;
   assert.match(describeEnvironment(bare, [], true), /none are configured.*use run_command/);
   assert.doesNotMatch(describeEnvironment(bare, [], false), /run_command/, "single-shot mode has no commands");
+  assert.match(
+    describeEnvironment(toolchain, selectChecks(toolchain, {}).run, true, ["test"]),
+    /\nAlready failing before your change, on the unmodified code: test\. A failure there is not caused by you/,
+  );
 });
 
 test("the PR body says which checks ran, and when none did", () => {
@@ -170,6 +174,53 @@ test("the PR body says which checks ran, and when none did", () => {
   assert.match(objected, /^\*\*The reviewer objected to this change\.\*\*/, "objections come first");
   assert.match(objected, /^- NextRun is unchanged$/m);
   assert.match(objected, /Checks passed: test\./);
+
+  const before = describeVerification({
+    checksRun: 2,
+    results: [
+      { script: "lint", passed: true, output: "" },
+      { script: "test", passed: false, failingBefore: true, output: "1 failing" },
+    ],
+  });
+  assert.match(before, /^Checks passed: lint\.\n\*\*Already failing before this change:\*\* test\. It failed on the unmodified code too/);
+  assert.match(
+    describeVerification({ checksRun: 1, results: [{ script: "test", passed: false, failingBefore: true, output: "" }] }),
+    /^No check passed\.\n\*\*Already failing before this change:\*\* test\./,
+    "an already-failing check is never reported as passed",
+  );
+});
+
+test("verification does not block on a check that already failed before the change", { skip: require("node:child_process").spawnSync("docker", ["version"]).status === 0 ? false : "Docker is not available" }, async (t) => {
+  const fs = require("node:fs");
+  const { execFileSync } = require("node:child_process");
+  const { verifyWorkspace, workspacePath } = require("../dist/services/workspaceService");
+  const id = `verify-test-${process.pid}`;
+  const dir = workspacePath(id);
+  fs.mkdirSync(dir, { recursive: true });
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  const toolchain = { image: "node:20-bookworm", env: {} };
+  const check = (name, script) => ({ name, command: ["sh", "-c", script] });
+
+  const tolerated = await verifyWorkspace(
+    id,
+    toolchain,
+    { run: [check("test", "echo old failure; exit 1"), check("lint", "echo fine")], unavailable: [] },
+    ["test"],
+  );
+  assert.equal(tolerated.passed, true);
+  assert.deepEqual(
+    tolerated.results.map(({ script, passed, failingBefore }) => ({ script, passed, failingBefore })),
+    [
+      { script: "test", passed: false, failingBefore: true },
+      { script: "lint", passed: true, failingBefore: undefined },
+    ],
+    "the failure is recorded and the next check still runs",
+  );
+
+  const broken = await verifyWorkspace(id, toolchain, { run: [check("lint", "exit 2"), check("test", "true")], unavailable: [] }, ["test"]);
+  assert.equal(broken.passed, false, "a check that passed before still blocks");
+  assert.deepEqual(broken.results.map((result) => result.script), ["lint"]);
 });
 
 test("environment snapshots are cached per repository and per environment", () => {

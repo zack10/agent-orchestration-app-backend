@@ -172,6 +172,12 @@ test("run_check runs only available checks and keeps the start and end of long o
 
   ctx.runCheck = async () => ({ exitCode: 137, timedOut: true, output: "" });
   assert.match((await run(ctx, "run_check", { check: "test" })).output, /TIMED OUT/);
+
+  ctx.failingBefore = { test: "DateTest failed on the unmodified code" };
+  ctx.runCheck = async () => ({ exitCode: 1, timedOut: false, output: "DateTest failed" });
+  const before = (await run(ctx, "run_check", { check: "test" })).output;
+  assert.match(before, /\[This check already failed before your change, on the unmodified code\./);
+  assert.match(before, /DateTest failed on the unmodified code$/);
 });
 
 test("a repository's own limits cap command output and file reads", async (t) => {

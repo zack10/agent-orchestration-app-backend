@@ -151,6 +151,7 @@ export const describeEnvironment = (
   toolchain: Toolchain,
   checks: Array<{ name: string; command: string[] }>,
   canRunCommands: boolean,
+  failingBefore: string[] = [],
 ) =>
   [
     ...(toolchain.language ? [`Language: ${toolchain.language}`] : []),
@@ -162,6 +163,11 @@ export const describeEnvironment = (
             ? " Find out how it is built and tested from its own files (README, build files, CI configuration) and use run_command to do that."
             : ""
         }`,
+    ...(failingBefore.length
+      ? [
+          `Already failing before your change, on the unmodified code: ${failingBefore.join(", ")}. A failure there is not caused by you; compare with how it failed before, and fix only what the ticket asks.`,
+        ]
+      : []),
   ].join("\n");
 
 /** A one-line description for prompts and events. */
