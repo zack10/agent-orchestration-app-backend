@@ -150,10 +150,13 @@ sequenceDiagram
     API->>G: run worker claims execution (lease)
     G->>GH: base SHA + installation token
     G->>D: clone at base SHA, resolve environment, setup (no token)
-    G->>L: internal plan, then file edits
+    G->>L: triage (may decline), internal plan, then file edits
     G->>D: write files, run the repository's checks (network off)
     G->>L: review the diff
     G->>API: store DIFF artifact → AWAITING_PUBLISH_APPROVAL
+    opt reviewer still objects after the last attempt
+        API->>T: comment with the reviewer's objections
+    end
     Human->>API: POST /approvals/publish {snapshotHash = diff hash}
     API->>D: fresh clone, git apply approved diff, push branch
     API->>GH: open draft pull request
@@ -175,8 +178,8 @@ stateDiagram-v2
     RUNNING --> VERIFYING: edits written
     RUNNING --> QUEUED: transient error / lease expired
     VERIFYING --> QUEUED: transient error / lease expired
-    VERIFYING --> AWAITING_PUBLISH_APPROVAL: verified + reviewed diff
-    RUNNING --> BLOCKED: 3 rejected attempts
+    VERIFYING --> AWAITING_PUBLISH_APPROVAL: verified diff (reviewed, or with the reviewer's objections)
+    RUNNING --> BLOCKED: ticket declined / 3 failed attempts
     VERIFYING --> BLOCKED: 3 failed attempts
     AWAITING_PUBLISH_APPROVAL --> PUBLISHING: diff approved
     AWAITING_PUBLISH_APPROVAL --> CANCELED: diff rejected
@@ -193,37 +196,41 @@ stateDiagram-v2
 ```
 
 - Runs hold a lease (`EXECUTION_LEASE_MS`) renewed by a heartbeat. If a worker dies, a sweep requeues the run once the lease expires.
+- A requeued run resumes from its last completed graph step (`GraphCheckpoint`), not from the clone. A failed model call is retried with backoff before it fails the step.
 - Transient failures are retried; a moved base branch, a changed diff, exhausted LLM credits or a long quota wait fail immediately.
-- Trello gets a comment on plan, block, failure and PR creation.
+- Trello gets a comment on plan, block, failure and PR creation, and when a change reaches publish approval with the reviewer's objections.
 
 ### Inside a run
 
-The run step is a LangGraph state graph (`src/services/agentGraph/executionGraph.ts`). Each change gets up to 3 attempts; feedback from a failed attempt is fed into the next one. Every retry starts from a clean checkout of the base commit, so it never builds on a failed attempt's edits.
+The run step is a LangGraph state graph (`src/services/agentGraph/executionGraph.ts`). Each change gets up to 3 attempts; feedback from a failed attempt is fed into the next one. A retry normally starts from a clean checkout of the base commit, so it never builds on a failed attempt's edits. The exception is a `tool_loop` attempt that ran out of its share of tokens or time part-way: the next attempt continues from its changes.
 
 ```mermaid
 flowchart TD
-    start([start]) --> load["load_context<br/>agent, plan task, base SHA, clone workspace"]
-    load --> inspect["inspect_repo<br/>file tree, scripts, relevant files"]
-    inspect --> plan["plan_change<br/>LLM: internal plan"]
+    start([start]) --> load["load_context<br/>agent, plan task, base SHA, clone workspace,<br/>environment (configured, devcontainer or discovered),<br/>setup + baseline checks"]
+    load --> inspect["inspect_repo<br/>file tree, relevant files"]
+    inspect --> triage["triage_ticket<br/>LLM: can this ticket be done here?"]
+    triage -->|declined| blocked
+    triage -->|proceed| plan["plan_change<br/>LLM: internal plan"]
     plan -->|single_shot| impl["implement_change<br/>LLM: FILE blocks"]
     plan -->|tool_loop| loop["agent_loop<br/>LLM + sandbox tools until finish"]
     impl -->|output parsed| policy["enforce_policy<br/>file count, protected paths"]
     impl -->|malformed output| impl
     impl -->|3rd malformed output| blocked
     loop -->|finished with changes| policy
-    loop -->|out of steps, no changes| loop
-    loop -->|declined, token/time budget, 3rd failure| blocked
+    loop -->|no changes, out of steps or budget share| analyze
+    loop -->|declined, execution budget spent, 3rd failure| blocked
     policy -->|violation| analyze
-    policy -->|allowed| verify["verify_change<br/>npm scripts in Docker, network off"]
-    verify -->|pass| review["review_diff<br/>secret patterns + LLM review"]
+    policy -->|allowed| verify["verify_change<br/>repository's checks in Docker, network off"]
+    verify -->|pass| review["review_diff<br/>secret patterns, then LLM review<br/>(tool_loop: code-reading reviewer)"]
     verify -->|fail| analyze["analyze_failure<br/>LLM: guidance for next attempt"]
-    review -->|issues found| analyze
-    review -->|clean| artifact["create_diff_artifact<br/>DIFF + PUBLISH approval"]
+    review -->|objections or secret found, attempts left| analyze
+    review -->|approved| artifact["create_diff_artifact<br/>DIFF + PUBLISH approval"]
+    review -->|objections, last attempt| artifact
     analyze -->|attempts left| impl
     analyze -->|attempts left, tool_loop| loop
     analyze -->|none left| blocked(["block_execution<br/>BLOCKED"])
     verify -->|3rd failure| blocked
-    review -->|3rd failure| blocked
+    review -->|secret found, 3rd attempt| blocked
     policy -->|3rd violation| blocked
     artifact --> done(["AWAITING_PUBLISH_APPROVAL"])
 ```
@@ -231,13 +238,39 @@ flowchart TD
 `EXECUTION_AGENT_MODE` picks how the change is made:
 
 - `single_shot` (default): `implement_change` asks the model once per attempt for whole files.
-- `tool_loop`: `agent_loop` gives the model the sandbox tools (`src/services/sandbox/tools.ts`: list, read, search, edit, run a check, finish). It works step by step against a long-lived container with no network, until it calls `finish` or a budget runs out: `AGENT_MAX_STEPS` model calls per attempt (or the execution's `budget.maxSteps`), the execution's `budget.maxTokens` across all attempts, and its `budget.maxDurationSeconds`. The agent can also decline the ticket (`finish` with status `blocked`), which blocks the execution without retrying. Older tool output is shortened as the conversation grows. Each model call is a `GRAPH_AGENT_STEP` event and each tool call a `ToolCall` row, so a run can be replayed.
+- `tool_loop`: `agent_loop` gives the model the sandbox tools (`src/services/sandbox/tools.ts`): `list_files`, `read_file`, `search_code`, `edit_file`, `run_check`, `run_command`, `skip_reproduction` and `finish`. It works step by step against a long-lived container with no network, until it calls `finish` or a budget runs out: `AGENT_MAX_STEPS` model calls per attempt (or the execution's `budget.maxSteps`), the execution's `budget.maxTokens` across all attempts, and its `budget.maxDurationSeconds`. The agent can also decline the ticket (`finish` with status `blocked`), which blocks the execution without retrying. Each model call is a `GRAPH_AGENT_STEP` event and each tool call a `ToolCall` row, so a run can be replayed.
+  - The tools enforce the rules, not only the prompt: protected paths can't be edited, existing test files can't be changed (new ones can), and code can change only after a new test has failed or the agent has said with `skip_reproduction` why no test can show the change.
+  - Old tool results are shortened in batches, so the start of the conversation stays the same and the provider's prompt cache keeps working.
+  - Check and command output is capped at 10,000 characters with the start and the end kept, and `read_file` returns up to 400 lines per call. A repository can set `executionPolicy.maxToolOutputChars` (1,000-20,000) and `executionPolicy.maxReadLines` (50-400).
 
 In both modes, policy, verification and review run afterwards, independently of what the agent reports.
 
+#### The reviewer advises, a person decides
+
+In `tool_loop` mode the reviewer reads the code with read-only tools (`list_files`, `read_file`, `search_code`) and answers a fixed checklist: does the diff change the code that produces the wrong behaviour, is every name it adds used by the existing code, do the new tests call the existing code, does the ticket's example work. Our code makes the decision from the answers, so a reviewer that finds a problem can't still approve.
+
+An objection goes back to the next attempt as feedback. If the reviewer still objects after the last attempt, the verified change is not thrown away. It goes to publish approval with the objections attached, and they appear at the top of the Trello comment and the draft PR description. Only the automatic secret check blocks a change outright. Suggestions that don't reject the change are shown with it.
+
+#### Choosing models and reasoning per call
+
+An agent can set a model and a reasoning effort for each kind of call, keyed by prompt name (`triage`, `plan`, `agent`, `analyze`, `review`, `reviewer`, `discover`, `implement`). Anything unset uses the agent's own model and the model's default effort.
+
+```json
+{
+  "config": {
+    "models": { "triage": { "provider": "openai", "model": "gpt-5-nano" } },
+    "reasoningEffort": { "triage": "low", "plan": "low", "analyze": "low" }
+  }
+}
+```
+
+- `models` generalises the older `config.reviewer`, which still works as `models.review` and `models.reviewer`. A model of the agent's provider without its own `apiKey` uses the agent's key. Keys are encrypted and redacted like the agent's.
+- `reasoningEffort` (`low`, `medium` or `high`) is sent to OpenAI-compatible APIs as `reasoning_effort`, and only when set, because models without reasoning reject it. Gemini ignores it for now; Anthropic's extended thinking is off already.
+- A misspelt call kind or an unknown level is refused when the agent is saved.
+
 #### Token limits
 
-Every model call, from either pipeline, is recorded in the `LlmUsage` table with its tokens and what it was for (`plan.v1`, `agent.v2`, `task`, ...). Two limits are checked before each call:
+Every model call, from either pipeline, is recorded in the `LlmUsage` table with its tokens (input, of which read from the provider's cache, and output, of which reasoning) and what it was for (`plan.v3`, `agent.v6`, `task`, ...). `GET /api/executions/:id` returns them per model as `usage`. Two limits are checked before each call:
 
 - **Per execution:** `budget.maxTokens` on the execution (set from `EXECUTION_MAX_TOKENS` when it is created, default 200,000) covers all of its calls: plan, loop, review and failure analysis.
 - **Per day, across everything:** `LLM_DAILY_TOKEN_LIMIT` (default 2,000,000 per UTC day, `0` to switch off). Once reached, new calls fail with a `TokenLimitError` that is not retried, and the execution fails with the reason. `GET /api/llm/usage/today` returns `{ used, limit, resetsAt }`.
@@ -322,12 +355,14 @@ erDiagram
     Execution ||--o{ Plan : versions
     Plan ||--o{ PlanTask : contains
     PlanTask ||--o{ TaskAttempt : tries
+    TaskAttempt ||--o{ ToolCall : "agent and reviewer tool calls"
     Execution ||--o{ Approval : gates
     Execution ||--o{ Artifact : produces
     Execution ||--o{ ExecutionEvent : "audit log"
+    Execution ||--o{ LlmUsage : "tokens per model call"
 ```
 
-`OutboxEvent` and `InboxReceipt` stand alone and back the messaging guarantees above. An execution's idempotency key is `workItemId:revisionHash`, so re-syncing an unchanged card never creates a second execution.
+`OutboxEvent` and `InboxReceipt` stand alone and back the messaging guarantees above. `GraphCheckpoint` stores the run graph's state after each step, so a requeued run resumes where it stopped. `LlmUsage` rows from the task pipeline carry a task id instead of an execution id. An execution's idempotency key is `workItemId:revisionHash`, so re-syncing an unchanged card never creates a second execution.
 
 ## Security model
 
@@ -338,7 +373,7 @@ erDiagram
 - Production refuses to start without `API_AUTH_TOKEN`, `CORS_ORIGINS`, `DATABASE_URL` and `ENCRYPTION_KEY`.
 
 **Secrets**
-- Agent `config.apiKey` and integration credentials are encrypted at rest (`ENCRYPTION_KEY`) and redacted from API responses.
+- Agent API keys (`config.apiKey`, and those in `config.reviewer` and `config.models`) and integration credentials are encrypted at rest (`ENCRYPTION_KEY`) and redacted from API responses.
 - Logged errors omit query strings and headers (`describeError()`), so provider keys and tokens are not written to logs.
 - Raw LLM output is not stored unless `STORE_RAW_LLM_OUTPUT=true`.
 
@@ -410,7 +445,7 @@ It then becomes the repository's `verificationConfig.toolchain`, and every later
 
 Take `snapshotHash` from the pending approval in `GET /api/executions/:id`. A mismatched hash, or an approval that was already decided, returns `409`.
 
-Docker Desktop must be running before an approved plan can execute. The workflow supports Node/TypeScript repositories.
+Docker Desktop must be running before an approved plan can execute. The repository can be in any language: its environment and checks come from its configuration, its devcontainer or discovery (see [Repository environment](#repository-environment)).
 
 ## API reference
 
@@ -487,6 +522,7 @@ An agent without a `provider` uses `LLM_DEFAULT_PROVIDER` and `LLM_DEFAULT_MODEL
 | `npm run test:e2e` | End-to-end suites against a running server |
 | `npm run test:e2e:smoke` | Only the credential-free smoke suite |
 | `npm run eval:coding` | Coding benchmark: how well the agent fixes real bugs (see below) |
+| `npm run eval:reviewer` | Replays stored approved diffs through the reviewer alone, graded by the hidden tests (`--model` to compare models, `--grade-only` for no model calls) |
 
 Run a single unit test file with `npm run build && node --test tests/auditFixes.test.js`. New test files must be added to the `test` script in `package.json`.
 
@@ -527,7 +563,7 @@ Python (`python/`, `unittest`) and Go (`go/`, `go test`), standard library only:
 | 02 | Invoice totals a few cents off (`money` and `invoice`) | Negative amounts parsed and printed wrong (`Parse` and `Format`) | Multi-file change |
 | 03 | Vague "reorder list is missing things" | Vague "nightly job ran several times after downtime" | Finding the cause from a symptom |
 
-Per run, the runner points the sandbox repo's `main` at the scenario's code, creates the Trello card, approves the plan, waits for a diff or `BLOCKED`, **rejects publishing** (no PR is opened), and grades the diff in a network-less Docker container: the repo's own tests, then the hidden tests, in the suite's grader image. Outcomes are *correct fix*, *wrong fix shipped* (a PR would have been opened but the hidden test fails, which is the key number), *correctly blocked*, *no fix* and *infrastructure failure*. It writes `docs/testing/coding-eval-<date>.md`, prints a row for the roadmap's results log, and restores `main` to the clean project.
+Per run, the runner points the sandbox repo's `main` at the scenario's code, creates the Trello card, approves the plan, waits for a diff or `BLOCKED`, **rejects publishing** (no PR is opened), and grades the diff in a network-less Docker container: the repo's own tests, then the hidden tests, in the suite's grader image. Outcomes are *correct fix*, *wrong fix shipped* (a PR would have been opened with no warning but the hidden test fails, which is the key number), *wrong fix, reviewer objected* (the same, but the approver saw the reviewer's objections; the run also checks that the objections comment reached the Trello card), *correctly blocked*, *no fix* and *infrastructure failure*. Hidden tests check only what the ticket asks for, as in SWE-bench Verified. Each run's tokens, cache share and cost are in the report when `E2E_PRICE_PER_MTOK` is set ("input,cached,output" per million tokens, or per model: `gpt-5-mini=0.25,0.025,2;gpt-5-nano=0.05,0.005,0.4`); `E2E_REASONING_EFFORT` and `E2E_CALL_MODELS` set the agent's `reasoningEffort` and `models`. It writes `docs/testing/coding-eval-<date>.md`, prints a row for the roadmap's results log, and restores `main` to the clean project.
 
 ```bash
 npm run eval:coding -- --check            # setup check, no LLM calls
@@ -571,7 +607,8 @@ src/
     workspaceService.ts     Docker clone/verify/diff/publish, long-lived run sandbox
     agentGraph/             LangGraph run graph, agent loop, repo context, repo policy, diff review
     llm/                    provider registry, providers, tool calling, retries, output errors
-    sandbox/                agent tools (list/read/search/edit/run_check/finish) with policy + ToolCall recording
+    sandbox/                agent and reviewer tools (list/read/search/edit/run_check/run_command/skip_reproduction/finish/verdict) with policy + ToolCall recording
+    toolchain/              repository environments: configuration, devcontainer, discovery, checks
     taskQueueService.ts, agentRunner.ts, promptBuilder.ts   task pipeline
     rabbitMQService.ts      connection, subscribe with retry/dead-letter
   integrations/         tracker adapters + registry, GitHub App
@@ -589,9 +626,10 @@ artifacts/              approved diffs, one per execution
 ## Known limits
 
 - **One tracker, one source host.** Trello is the only issue tracker and GitHub the only source control. Trackers are pluggable (`IssueTrackerAdapter`); source control is not yet (AUDIT A2).
-- **Node/TypeScript repositories only for now**, verified through their npm scripts. Support for any language, framework and platform is the next phase (Phase 4 of `docs/plans/AGENTIC_ROADMAP.md`). The roadmap's "Known limitations" table lists every way the agent is still tied to one language, platform, service or kind of task, and the phase that removes each.
-- **Repository context is selected by file name.** The agent sees up to 12 files whose paths match ticket words, each cut at 20 KB, and returns whole files. Vague tickets and very large files are weak spots.
-- **The agent can modify existing tests.** The coding benchmark's hidden tests catch this when measuring; nothing blocks it in a normal run yet (Phase 2 of `docs/plans/AGENTIC_ROADMAP.md`).
+- **Any language, measured on three so far.** The benchmark covers Node, Python and Go; real projects in other stacks (the roadmap's reference projects) haven't been run yet, so Phase 4 of `docs/plans/AGENTIC_ROADMAP.md` is still in progress. The roadmap's "Known limitations" table lists every way the agent is still tied to one language, platform, service or kind of task, and the phase that removes each.
+- **`single_shot` mode selects context by file name.** The agent sees up to 12 files whose paths match ticket words, each cut at 20 KB, and returns whole files, so vague tickets and very large files are weak spots. `tool_loop` mode reads and searches the repository itself.
+- **Vague tickets can still get a wrong fix.** The agent sometimes adds new code beside the faulty function instead of fixing it. The reviewer catches this and the approver sees its objections, but the change still reaches approval.
+- **The newest OpenAI models** need the Responses API for tool calls, which isn't supported yet (roadmap limitation 24).
 - **One HTTP connector**, not a full Model Context Protocol transport. Skills and MCP resources are stored and assignable but not yet included in prompts.
 - **Process-local** rate limiting and logs. Multi-instance deployments need a shared limiter (e.g. Redis), centralized logs, metrics and tracing.
 
