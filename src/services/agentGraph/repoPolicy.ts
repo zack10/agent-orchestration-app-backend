@@ -1,6 +1,9 @@
 export interface RepositoryPolicy {
   maxChangedFiles?: number;
   protectedPaths?: string[];
+  /** Tool result limits for the agent; see TOOL_OUTPUT_DEFAULTS. */
+  maxToolOutputChars?: number;
+  maxReadLines?: number;
 }
 
 // Used only when no toolchain is known; normally the toolchain's

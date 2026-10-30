@@ -30,7 +30,21 @@ export interface ToolContext {
   isBaseFile: (file: string) => boolean;
   /** Whether the problem was shown before code changed; updated by the tools. */
   reproduction: Reproduction;
+  /** The repository's output limits; TOOL_OUTPUT_DEFAULTS where unset. */
+  limits?: Partial<ToolOutputLimits>;
 }
+
+export interface ToolOutputLimits {
+  /** Most characters one tool result may hold. */
+  maxOutputChars: number;
+  /** Most lines one read_file call returns. */
+  maxReadLines: number;
+}
+
+// Command output is capped like Codex CLI's (about 10 KB, start and end kept). A repository
+// may set other limits up to TOOL_OUTPUT_CEILINGS (the earlier defaults).
+export const TOOL_OUTPUT_DEFAULTS: ToolOutputLimits = { maxOutputChars: 10_000, maxReadLines: 400 };
+export const TOOL_OUTPUT_CEILINGS: ToolOutputLimits = { maxOutputChars: 20_000, maxReadLines: 400 };
 
 /**
  * Code (non-test files) may change only once a new test has failed, or the
@@ -80,9 +94,7 @@ export interface ReviewVerdict {
   checks?: Record<string, { answer: string; evidence: string }>;
 }
 
-const MAX_OUTPUT_CHARS = 20_000;
 const MAX_LIST_ENTRIES = 500;
-const MAX_READ_LINES = 400;
 const MAX_READ_BYTES = 5_000_000;
 const MAX_SEARCH_MATCHES = 100;
 const MAX_SEARCH_FILE_BYTES = 1_000_000;
@@ -118,7 +130,7 @@ export const SANDBOX_TOOLS: ToolDefinition[] = [
   },
   {
     name: "read_file",
-    description: `Read a file with line numbers. At most ${MAX_READ_LINES} lines per call; use startLine/endLine to page through larger files.`,
+    description: `Read a file with line numbers. At most ${TOOL_OUTPUT_DEFAULTS.maxReadLines} lines per call; use startLine/endLine to page through larger files.`,
     parameters: {
       type: "object",
       properties: {
@@ -320,13 +332,18 @@ const completed = (output: string): ToolOutcome => ({ status: "COMPLETED", outpu
 const denied = (output: string): ToolOutcome => ({ status: "DENIED", output });
 const failed = (output: string): ToolOutcome => ({ status: "FAILED", output });
 
-/** Caps output; keeps the end for command output, where errors are. */
-const cap = (text: string, keep: "head" | "tail" = "head") => {
-  if (text.length <= MAX_OUTPUT_CHARS) return text;
-  const note = `[output truncated: ${text.length} characters, showing the ${keep === "head" ? "first" : "last"} ${MAX_OUTPUT_CHARS}]`;
-  return keep === "head"
-    ? `${text.slice(0, MAX_OUTPUT_CHARS)}\n${note}`
-    : `${note}\n${text.slice(-MAX_OUTPUT_CHARS)}`;
+const limit = (ctx: ToolContext, name: keyof ToolOutputLimits) => ctx.limits?.[name] ?? TOOL_OUTPUT_DEFAULTS[name];
+
+/**
+ * Caps output. File and search results keep the start; command output keeps
+ * the start and the end (where errors are), half each.
+ */
+const cap = (ctx: ToolContext, text: string, keep: "head" | "ends" = "head") => {
+  const max = limit(ctx, "maxOutputChars");
+  if (text.length <= max) return text;
+  if (keep === "head") return `${text.slice(0, max)}\n[output truncated: ${text.length} characters, showing the first ${max}]`;
+  const half = Math.floor(max / 2);
+  return `${text.slice(0, half)}\n[output truncated: ${text.length} characters, showing the first and last ${half}]\n${text.slice(-half)}`;
 };
 
 /** Applies the path rules shared by every file tool; a string is a denial. */
@@ -374,7 +391,7 @@ const listFiles = (ctx: ToolContext, args: z.infer<typeof ARGS.list_files>) => {
     return failed(`"${args.path}" is not a directory.`);
   const { files, truncated } = walk(ctx, target.relativePath || ".", MAX_LIST_ENTRIES);
   const note = truncated ? `\n[only the first ${MAX_LIST_ENTRIES} files are listed; list a subdirectory]` : "";
-  return completed(cap(`${files.join("\n") || "(no files)"}${note}`));
+  return completed(cap(ctx, `${files.join("\n") || "(no files)"}${note}`));
 };
 
 const readFile = (ctx: ToolContext, args: z.infer<typeof ARGS.read_file>) => {
@@ -391,13 +408,13 @@ const readFile = (ctx: ToolContext, args: z.infer<typeof ARGS.read_file>) => {
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
   const start = args.startLine ?? 1;
   if (start > lines.length) return failed(`"${args.path}" has only ${lines.length} lines.`);
-  const end = Math.min(args.endLine ?? lines.length, lines.length, start + MAX_READ_LINES - 1);
+  const end = Math.min(args.endLine ?? lines.length, lines.length, start + limit(ctx, "maxReadLines") - 1);
   const body = lines
     .slice(start - 1, end)
     .map((line, index) => `${start + index}: ${line}`)
     .join("\n");
   const more = end < lines.length ? `\n[more: lines ${end + 1}-${lines.length}; call read_file with startLine ${end + 1}]` : "";
-  return completed(cap(`${target.relativePath} (lines ${start}-${end} of ${lines.length})\n${body}${more}`));
+  return completed(cap(ctx, `${target.relativePath} (lines ${start}-${end} of ${lines.length})\n${body}${more}`));
 };
 
 const searchCode = (ctx: ToolContext, args: z.infer<typeof ARGS.search_code>) => {
@@ -417,10 +434,10 @@ const searchCode = (ctx: ToolContext, args: z.infer<typeof ARGS.search_code>) =>
       if (!lines[index].toLowerCase().includes(query)) continue;
       matches.push(`${file}:${index + 1}: ${lines[index].trim().slice(0, MAX_MATCH_LINE_CHARS)}`);
       if (matches.length >= MAX_SEARCH_MATCHES)
-        return completed(cap(`${matches.join("\n")}\n[stopped at ${MAX_SEARCH_MATCHES} matches; narrow the query or path]`));
+        return completed(cap(ctx, `${matches.join("\n")}\n[stopped at ${MAX_SEARCH_MATCHES} matches; narrow the query or path]`));
     }
   }
-  return completed(cap(matches.join("\n") || `No matches for "${args.query}".`));
+  return completed(cap(ctx, matches.join("\n") || `No matches for "${args.query}".`));
 };
 
 const editFile = (ctx: ToolContext, args: z.infer<typeof ARGS.edit_file>) => {
@@ -479,7 +496,7 @@ const runCheck = async (ctx: ToolContext, args: z.infer<typeof ARGS.run_check>) 
     return denied(`"${args.check}" is not an available check. Available: ${ctx.checkScripts.join(", ") || "none"}.`);
   const result = await ctx.runCheck(args.check);
   const note = noteReproduction(ctx, result);
-  return completed(cap(`${args.check} check: ${verdict(result, CHECK_TIMEOUT_MS)}\n${result.output.trim()}`, "tail") + note);
+  return completed(cap(ctx, `${args.check} check: ${verdict(result, CHECK_TIMEOUT_MS)}\n${result.output.trim()}`, "ends") + note);
 };
 
 const verdict = (result: SandboxResult, timeoutMs: number) =>
@@ -493,7 +510,7 @@ const runCommand = async (ctx: ToolContext, args: z.infer<typeof ARGS.run_comman
   const timeoutMs = (args.timeoutSeconds ?? CHECK_TIMEOUT_MS / 1000) * 1000;
   const result = await ctx.runCommand(args.command, timeoutMs);
   const note = noteReproduction(ctx, result);
-  return completed(cap(`$ ${args.command}\n${verdict(result, timeoutMs)}\n${result.output.trim()}`, "tail") + note);
+  return completed(cap(ctx, `$ ${args.command}\n${verdict(result, timeoutMs)}\n${result.output.trim()}`, "ends") + note);
 };
 
 /** Runs one tool call. Unknown tools and invalid arguments are FAILED results. */

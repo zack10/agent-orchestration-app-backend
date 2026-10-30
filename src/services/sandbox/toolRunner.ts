@@ -104,5 +104,6 @@ export const executionToolContext = async (
     isTestFile: (file) => isTestFile(toolchain, file),
     isBaseFile: (file) => baseFiles.has(file),
     reproduction: { shown: newTest, newTest },
+    limits: { maxOutputChars: policy?.maxToolOutputChars, maxReadLines: policy?.maxReadLines },
   };
 };

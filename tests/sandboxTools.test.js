@@ -152,7 +152,7 @@ test("search_code finds plain text case-insensitively and caps matches", async (
   assert.match((await run(ctx, "search_code", { query: "needle" })).output, /stopped at 100 matches/);
 });
 
-test("run_check runs only available checks and keeps the end of long output", async (t) => {
+test("run_check runs only available checks and keeps the start and end of long output", async (t) => {
   const { ctx, checks } = workspace(t);
   const unknown = await run(ctx, "run_check", { check: "deploy" });
   assert.equal(unknown.status, "DENIED");
@@ -165,11 +165,24 @@ test("run_check runs only available checks and keeps the end of long output", as
 
   ctx.runCheck = async () => ({ exitCode: 0, timedOut: false, output: `${"x".repeat(30_000)}\nLAST LINE` });
   const long = await run(ctx, "run_check", { check: "test" });
-  assert.match(long.output, /^\[output truncated/);
+  assert.match(long.output, /^test check: PASSED\n/);
+  assert.match(long.output, /\[output truncated: \d+ characters, showing the first and last 5000\]/);
   assert.match(long.output, /LAST LINE$/);
+  assert.ok(long.output.length < 10_200, "about 10,000 characters by default");
 
   ctx.runCheck = async () => ({ exitCode: 137, timedOut: true, output: "" });
   assert.match((await run(ctx, "run_check", { check: "test" })).output, /TIMED OUT/);
+});
+
+test("a repository's own limits cap command output and file reads", async (t) => {
+  const { root, ctx } = workspace(t);
+  ctx.limits = { maxOutputChars: 2000, maxReadLines: 50 };
+  ctx.runCommand = async () => ({ exitCode: 0, timedOut: false, output: `${"z".repeat(5000)}\nEND` });
+  const output = (await run(ctx, "run_command", { command: "build" })).output;
+  assert.match(output, /showing the first and last 1000\]/);
+  assert.match(output, /END$/);
+  fs.writeFileSync(path.join(root, "long.txt"), "line\n".repeat(120));
+  assert.match((await run(ctx, "read_file", { path: "long.txt" })).output, /^long\.txt \(lines 1-50 of 120\)/);
 });
 
 test("a test file a command created is new, so the agent may edit it", async (t) => {
@@ -180,7 +193,7 @@ test("a test file a command created is new, so the agent may edit it", async (t)
   assert.equal(edited.status, "COMPLETED");
 });
 
-test("run_command runs a shell command with a capped time limit and shows the end of its output", async (t) => {
+test("run_command runs a shell command with a capped time limit and shows the start and end of its output", async (t) => {
   const { ctx, commands } = workspace(t);
   const ok = await run(ctx, "run_command", { command: "make test ONLY=math" });
   assert.equal(ok.status, "COMPLETED");
@@ -195,7 +208,8 @@ test("run_command runs a shell command with a capped time limit and shows the en
   ctx.runCommand = async () => ({ exitCode: 2, timedOut: false, output: `${"y".repeat(30_000)}\nerror: LAST` });
   const failing = await run(ctx, "run_command", { command: "build" });
   assert.equal(failing.status, "COMPLETED", "a failing command is information, not a tool failure");
-  assert.match(failing.output, /^\[output truncated/);
+  assert.match(failing.output, /^\$ build\nFAILED \(exit code 2\)\n/);
+  assert.match(failing.output, /\[output truncated/);
   assert.match(failing.output, /error: LAST$/);
 
   ctx.runCommand = async () => ({ exitCode: 137, timedOut: true, output: "" });
