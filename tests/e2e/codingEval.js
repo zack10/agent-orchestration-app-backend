@@ -23,7 +23,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { promisify } = require("node:util");
 
-const { api, assertServerHealthy, env, envInt, runId, skipUnless } = require("./helpers");
+const { api, assertServerHealthy, env, envInt, poll, runId, skipUnless } = require("./helpers");
 const { cleanFiles, diffStats, grade, isTestFile, loadScenarios, loadSuites, scenarioFiles } = require("./codingScenarios");
 const {
   PIPELINE_ENV,
@@ -193,6 +193,16 @@ const runScenario = async (fixtures, scenario, runNumber) => {
       // Attempts ran out with the reviewer still objecting; the approver sees its objections.
       const objections = artifact.metadata?.reviewObjections ?? [];
       const objected = objections.length ? `reviewer objected: ${objections.join(" / ").slice(0, 200)}` : "";
+      // The approver must be told on the ticket; the comment follows the run step by a moment.
+      if (objections.length)
+        await poll(
+          "the reviewer objections comment on the Trello card",
+          async () => {
+            const comments = await trello("GET", `/cards/${cardId}/actions`, { filter: "commentCard" });
+            return comments.some((action) => action.data?.text?.includes("The reviewer objected to this change")) ? true : undefined;
+          },
+          { timeoutMs: 60_000 },
+        );
 
       const stats = diffStats(diff);
       result.files = stats.files;
