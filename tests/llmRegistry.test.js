@@ -130,6 +130,13 @@ test("agent validation accepts registered providers only", () => {
   assert.match(rejected.error.issues[0].message, /Unknown LLM provider/);
 });
 
+test("agent config.reasoningEffort accepts known call kinds and levels only", () => {
+  const body = (reasoningEffort) => ({ body: { name: "a", config: { reasoningEffort } } });
+  assert.equal(createAgentSchema.safeParse(body({ triage: "low", plan: "low", reviewer: "high" })).success, true);
+  assert.equal(createAgentSchema.safeParse(body({ triage: "minimal" })).success, false);
+  assert.equal(createAgentSchema.safeParse(body({ triag: "low" })).success, false, "a typo is refused, not ignored");
+});
+
 test("the built-in OpenAI profile calls tools through the Responses API unless OPENAI_TOOLS_API says chat", { todo: "Responses API provider code (roadmap limitation 24)" }, () => {
   assert.equal(parseProviderProfiles("", {}, "development")[0].toolsApi, "responses");
   assert.equal(parseProviderProfiles("", { OPENAI_TOOLS_API: "chat" }, "development")[0].toolsApi, "chat");

@@ -9,6 +9,7 @@ import { writeActionsToRoot } from "../../utils/codeWriter";
 import { decrypt } from "../../utils/crypto";
 import {
   EXECUTION_PROMPTS,
+  ExecutionPromptName,
   RenderedPrompt,
   executionPromptFragment,
   renderExecutionPrompt,
@@ -17,7 +18,7 @@ import { NonRetryableError } from "../../utils/safeError";
 import { parseAgentOutput } from "../../utils/llmUtils";
 import { hashSnapshot } from "../executionService";
 import { LLMService } from "../llm/LLMService";
-import { ToolRequest } from "../llm/types";
+import { ReasoningEffort, ToolRequest } from "../llm/types";
 import { TokenLimitError, prismaUsageLedger } from "../llm/usageLedger";
 import { DurableCheckpointSaver, prismaCheckpointStore } from "./checkpointer";
 import { ReviewVerdict, SANDBOX_TOOLS, describeReproduction } from "../sandbox/tools";
@@ -85,6 +86,8 @@ type GraphRoute =
   | "proceed"
   | undefined;
 
+type ReasoningEffortConfig = Partial<Record<ExecutionPromptName, ReasoningEffort>>;
+
 const ExecutionGraphState = Annotation.Root({
   executionId: Annotation<string>(),
   baseSha: Annotation<string | undefined>(),
@@ -94,6 +97,8 @@ const ExecutionGraphState = Annotation.Root({
   agentApiKey: Annotation<string | undefined>(),
   /** A separate model for reviewing diffs (agent config.reviewer); the agent's own if unset. */
   reviewer: Annotation<{ provider: string; model: string; apiKey?: string } | undefined>(),
+  /** Reasoning effort per kind of call (agent config.reasoningEffort, keyed by prompt name). */
+  reasoningEffort: Annotation<ReasoningEffortConfig>({ reducer: (_old, value) => value, default: () => ({}) }),
   ticket: Annotation<string | undefined>(),
   repoContext: Annotation<RepoContext | undefined>(),
   // How the repository is installed and checked, resolved after cloning.
@@ -171,6 +176,12 @@ const requireAgent = (state: GraphState) => {
   return { provider: state.agentProvider, model: state.agentModel };
 };
 
+/** The configured effort for the call a prompt version belongs to; unset leaves the model's default. */
+const effortFor = (state: GraphState, version: string) => {
+  const name = (Object.keys(EXECUTION_PROMPTS) as ExecutionPromptName[]).find((key) => EXECUTION_PROMPTS[key] === version);
+  return name ? state.reasoningEffort[name] : undefined;
+};
+
 /** Tokens every model call of this execution has used, from the usage ledger. */
 const executionTokensUsed = (state: GraphState) =>
   prismaUsageLedger.tokensUsedByExecution(state.executionId);
@@ -187,7 +198,7 @@ const askAgent = async (state: GraphState, prompt: RenderedPrompt) => {
     throw new TokenLimitError(
       `Execution token budget reached: ${used} of ${state.maxTokens} tokens used (budget.maxTokens)`,
     );
-  return llm.generateContent(provider, model, prompt, state.agentApiKey, {
+  return llm.generateContent(provider, model, { ...prompt, reasoningEffort: effortFor(state, prompt.version) }, state.agentApiKey, {
     purpose: prompt.version,
     executionId: state.executionId,
   });
@@ -199,7 +210,7 @@ const askAgentWithTools = (
   purpose: string,
 ) => {
   const { provider, model } = requireAgent(state);
-  return llm.generateWithTools(provider, model, request, state.agentApiKey, {
+  return llm.generateWithTools(provider, model, { ...request, reasoningEffort: effortFor(state, purpose) }, state.agentApiKey, {
     purpose,
     executionId: state.executionId,
   });
@@ -427,8 +438,13 @@ const loadExecutionContext = async (
   const attemptShare = Math.min(1, positive(budget.attemptShare, DEFAULT_ATTEMPT_SHARE));
   const resolved = llm.resolveModel(agent);
   const agentConfig = agent.config as
-    | { apiKey?: string; reviewer?: { provider: string; model: string; apiKey?: string } }
+    | {
+        apiKey?: string;
+        reviewer?: { provider: string; model: string; apiKey?: string };
+        reasoningEffort?: ReasoningEffortConfig;
+      }
     | null;
+  const reasoningEffort = agentConfig?.reasoningEffort ?? {};
   const agentApiKey = agentConfig?.apiKey
     ? decrypt(agentConfig.apiKey)
     : undefined;
@@ -456,7 +472,7 @@ const loadExecutionContext = async (
   // Discovery's model calls count against this execution's budget.
   const ask = (prompt: RenderedPrompt) =>
     askAgent(
-      { ...state, agentProvider: resolved.provider, agentModel: resolved.model, agentApiKey, maxTokens },
+      { ...state, agentProvider: resolved.provider, agentModel: resolved.model, agentApiKey, maxTokens, reasoningEffort },
       prompt,
     );
   // Later commands run in the snapshot taken after setup and the baseline checks.
@@ -485,6 +501,7 @@ const loadExecutionContext = async (
     budget: { maxSteps, maxTokens, maxDurationSeconds: (deadline - Date.now()) / 1000, attemptShare },
     promptVersions: promptVersionsFor(agentMode),
     ...(reviewer ? { reviewer: `${reviewer.provider}/${reviewer.model}` } : {}),
+    ...(Object.keys(reasoningEffort).length ? { reasoningEffort } : {}),
   });
 
   return {
@@ -494,6 +511,7 @@ const loadExecutionContext = async (
     agentModel: resolved.model,
     agentApiKey,
     reviewer,
+    reasoningEffort,
     ticket: `${execution.workItem.title}\n${execution.workItem.description ?? ""}`,
     agentMode,
     maxSteps,

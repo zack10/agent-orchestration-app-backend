@@ -1,7 +1,7 @@
 import axios from "axios";
 import { config } from "../../../config";
 import { LLMOutputError } from "../errors";
-import { LLMProvider, Model, TextResult, TokenUsage, ToolRequest, ToolTurn, UsageStats } from "../types";
+import { LLMProvider, Model, ReasoningEffort, TextPrompt, TextResult, TokenUsage, ToolRequest, ToolTurn, UsageStats } from "../types";
 
 interface OpenAIModel {
   id: string;
@@ -38,6 +38,9 @@ interface ChatUsage {
   prompt_tokens_details?: { cached_tokens?: number };
   completion_tokens_details?: { reasoning_tokens?: number };
 }
+
+// Only sent when set: models without reasoning reject the parameter.
+const reasoning = (effort: ReasoningEffort | undefined) => (effort ? { reasoning_effort: effort } : {});
 
 const tokenUsage = (usage: ChatUsage | undefined): TokenUsage => ({
   inputTokens: usage?.prompt_tokens ?? 0,
@@ -99,7 +102,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
    */
   async generateContent(
     model: string,
-    prompt: { system?: string; user: string },
+    prompt: TextPrompt,
     apiKey?: string,
   ): Promise<TextResult> {
     const { label } = this.profile;
@@ -114,6 +117,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       {
         model,
         messages,
+        ...reasoning(prompt.reasoningEffort),
       },
       {
         headers: this.headers(apiKey),
@@ -169,6 +173,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       {
         model,
         messages,
+        ...reasoning(request.reasoningEffort),
         tools: request.tools.map((tool) => ({
           type: "function",
           function: { name: tool.name, description: tool.description, parameters: tool.parameters },

@@ -6,6 +6,7 @@ import { withLLMRetry } from "./retry";
 import {
   LLMProvider,
   Model,
+  TextPrompt,
   TokenUsage,
   ToolRequest,
   ToolTurn,
@@ -122,7 +123,7 @@ export class LLMService {
   async generateContent(
     providerKey: string,
     model: string,
-    prompt: { system?: string; user: string },
+    prompt: TextPrompt,
     apiKey?: string,
     context?: UsageContext,
   ): Promise<string> {

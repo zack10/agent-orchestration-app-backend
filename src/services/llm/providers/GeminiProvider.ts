@@ -30,6 +30,7 @@ const tokenUsage = (usage: UsageMetadata | undefined): TokenUsage => ({
   reasoningTokens: usage?.thoughtsTokenCount ?? 0,
 });
 
+// shortcut: reasoningEffort is not mapped to Gemini's thinkingConfig yet (ignored), add it when a Gemini model is the benchmark default.
 export class GeminiProvider implements LLMProvider {
   private readonly apiKey = process.env.GEMINI_API_KEY || "";
 

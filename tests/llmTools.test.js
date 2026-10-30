@@ -219,6 +219,16 @@ test("OpenAI Responses API: a turn from another provider is sent as plain items;
   await assert.rejects(llm.generateWithTools("openai", "m", request), /content filter/);
 });
 
+test("reasoning effort is sent to OpenAI-compatible APIs only when set", async (t) => {
+  const reply = { choices: [{ finish_reason: "stop", message: { content: "ok" } }] };
+  const bodies = scripted(t, [reply, reply, reply]);
+  await llm.generateContent("groq", "m", { user: "hi", reasoningEffort: "low" });
+  await llm.generateWithTools("groq", "m", { messages: [ask], tools: [readFile], reasoningEffort: "high" });
+  await llm.generateContent("groq", "m", { user: "hi" });
+  assert.deepEqual(bodies.map((entry) => entry.body.reasoning_effort), ["low", "high", undefined]);
+  assert.equal("reasoning_effort" in bodies[2].body, false, "models without reasoning reject the parameter");
+});
+
 test("several results for one turn travel together; errors are marked", async (t) => {
   const bodies = scripted(t, [{ stop_reason: "end_turn", content: [{ type: "text", text: "ok" }] }]);
   await llm.generateWithTools("anthropic", "claude-haiku-5-5", {

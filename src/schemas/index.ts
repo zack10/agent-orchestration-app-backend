@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EXECUTION_PROMPTS, ExecutionPromptName } from "../prompts";
 import { getProviderRegistry } from "../services/llm/registry";
 
 const uuid = z.string().uuid();
@@ -18,6 +19,10 @@ const agentConfig = z
     reviewer: z
       .object({ provider: providerKey, model: z.string().min(1), apiKey: z.string().min(1).optional() })
       .strict()
+      .optional(),
+    // Reasoning effort per kind of execution call, e.g. { "triage": "low" }; unset keeps the model's default.
+    reasoningEffort: z
+      .record(z.enum(Object.keys(EXECUTION_PROMPTS) as [ExecutionPromptName, ...ExecutionPromptName[]]), z.enum(["low", "medium", "high"]))
       .optional(),
   })
   .passthrough();

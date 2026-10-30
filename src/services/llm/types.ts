@@ -2,7 +2,7 @@ export interface LLMProvider {
   listModels(apiKey?: string): Promise<Model[]>;
   generateContent(
     model: string,
-    prompt: { system?: string; user: string },
+    prompt: TextPrompt,
     apiKey?: string,
   ): Promise<TextResult>;
   generateWithTools(
@@ -52,10 +52,23 @@ export type ChatMessage =
       isError?: boolean;
     };
 
+/**
+ * How long a reasoning model thinks before it answers. Unset leaves the
+ * model's own default; a provider without such a setting ignores it.
+ */
+export type ReasoningEffort = "low" | "medium" | "high";
+
+export interface TextPrompt {
+  system?: string;
+  user: string;
+  reasoningEffort?: ReasoningEffort;
+}
+
 export interface ToolRequest {
   system?: string;
   messages: ChatMessage[];
   tools: ToolDefinition[];
+  reasoningEffort?: ReasoningEffort;
 }
 
 export interface TokenUsage {

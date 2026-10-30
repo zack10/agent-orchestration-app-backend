@@ -88,7 +88,11 @@ const ensureFixtures = async () => {
     name: "e2e-implementer",
     provider: env("E2E_LLM_PROVIDER"),
     model: env("E2E_LLM_MODEL"),
-    config: { apiKey: env("E2E_LLM_API_KEY") },
+    config: {
+      apiKey: env("E2E_LLM_API_KEY"),
+      // e.g. {"triage":"low","plan":"low","analyze":"low"}; unset keeps each model's default.
+      ...(env("E2E_REASONING_EFFORT") ? { reasoningEffort: JSON.parse(env("E2E_REASONING_EFFORT")) } : {}),
+    },
   };
   const { data: agents } = await api("GET", "/api/agents", { expectStatus: 200 });
   const agent = agents.find((candidate) => candidate.projectId === project.id);
