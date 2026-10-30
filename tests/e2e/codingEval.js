@@ -441,4 +441,4 @@ if (require.main === module)
     process.exitCode = 1;
   });
 
-module.exports = { eventMetrics, gradeDiff, parseArgs, summarize };
+module.exports = { OUTCOMES, eventMetrics, gradeDiff, log, parseArgs, prices, setDefaultBranch, suiteEnvironment, summarize, usageMetrics, useEnvironment };

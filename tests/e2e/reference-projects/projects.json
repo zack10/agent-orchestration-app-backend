@@ -1,0 +1,17 @@
+[
+  {
+    "id": "java/gson-1555",
+    "language": "Java",
+    "source": {
+      "dataset": "ByteDance-Seed/Multi-SWE-bench",
+      "file": "java/google__gson_dataset.jsonl",
+      "number": 1555
+    },
+    "grader": {
+      "image": "mswebench/google_m_gson:pr-1555",
+      "workdir": "/home/gson",
+      "testPatch": "/home/test.patch",
+      "test": ["mvn", "-o", "-B", "clean", "test", "-DfailIfNoTests=false", "-Dmaven.test.failure.ignore=true"]
+    }
+  }
+]
