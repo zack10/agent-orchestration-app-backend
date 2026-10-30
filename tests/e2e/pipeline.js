@@ -92,6 +92,8 @@ const ensureFixtures = async () => {
       apiKey: env("E2E_LLM_API_KEY"),
       // e.g. {"triage":"low","plan":"low","analyze":"low"}; unset keeps each model's default.
       ...(env("E2E_REASONING_EFFORT") ? { reasoningEffort: JSON.parse(env("E2E_REASONING_EFFORT")) } : {}),
+      // e.g. {"triage":{"provider":"openai","model":"gpt-5-nano"}}; unset runs every call on E2E_LLM_MODEL.
+      ...(env("E2E_CALL_MODELS") ? { models: JSON.parse(env("E2E_CALL_MODELS")) } : {}),
     },
   };
   const { data: agents } = await api("GET", "/api/agents", { expectStatus: 200 });

@@ -13,17 +13,18 @@ const providerKey = z
 
 // Agent schemas
 // config is free-form; the parts the server reads are checked.
+const callKind = z.enum(Object.keys(EXECUTION_PROMPTS) as [ExecutionPromptName, ...ExecutionPromptName[]]);
+const callModel = z
+  .object({ provider: providerKey, model: z.string().min(1), apiKey: z.string().min(1).optional() })
+  .strict();
 const agentConfig = z
   .object({
-    // A separate model for reviewing diffs; default the agent's own.
-    reviewer: z
-      .object({ provider: providerKey, model: z.string().min(1), apiKey: z.string().min(1).optional() })
-      .strict()
-      .optional(),
+    // A separate model for reviewing diffs; default the agent's own. Same as models.review and models.reviewer.
+    reviewer: callModel.optional(),
+    // A model per kind of execution call, e.g. { "triage": { "provider": "openai", "model": "gpt-5-nano" } }.
+    models: z.record(callKind, callModel).optional(),
     // Reasoning effort per kind of execution call, e.g. { "triage": "low" }; unset keeps the model's default.
-    reasoningEffort: z
-      .record(z.enum(Object.keys(EXECUTION_PROMPTS) as [ExecutionPromptName, ...ExecutionPromptName[]]), z.enum(["low", "medium", "high"]))
-      .optional(),
+    reasoningEffort: z.record(callKind, z.enum(["low", "medium", "high"])).optional(),
   })
   .passthrough();
 

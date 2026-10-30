@@ -152,4 +152,9 @@ test("agent validation checks config.reviewer and keeps other config as is", () 
   assert.equal(createAgentSchema.safeParse(body({ reviewer: { provider: "made-up", model: "x" } })).success, false);
   assert.equal(createAgentSchema.safeParse(body({ reviewer: { provider: "openai" } })).success, false, "a model is required");
   assert.equal(createAgentSchema.safeParse(body({ reviewer: { provider: "openai", model: "m", extra: 1 } })).success, false);
+
+  const nano = { provider: "openai", model: "gpt-5-nano" };
+  assert.equal(createAgentSchema.safeParse(body({ models: { triage: nano, plan: nano, analyze: nano } })).success, true);
+  assert.equal(createAgentSchema.safeParse(body({ models: { triag: nano } })).success, false, "a typo is refused, not ignored");
+  assert.equal(createAgentSchema.safeParse(body({ models: { plan: { provider: "made-up", model: "x" } } })).success, false);
 });

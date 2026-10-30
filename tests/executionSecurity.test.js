@@ -36,4 +36,13 @@ test("the agent's and the reviewer's API keys are encrypted and redacted", () =>
   assert.equal(/agent-key|reviewer-key/.test(JSON.stringify(config)), false);
   assert.equal(decrypt(config.reviewer.apiKey), "reviewer-key");
   assert.deepEqual(redactAgent({ id: "1", config }).config, { reviewer: { provider: "openai", model: "gpt-5" } });
+
+  const perCall = protectAgentConfig({
+    models: { triage: { provider: "openai", model: "gpt-5-nano", apiKey: "triage-key" }, plan: { provider: "openai", model: "gpt-5-nano" } },
+  });
+  assert.equal(JSON.stringify(perCall).includes("triage-key"), false);
+  assert.equal(decrypt(perCall.models.triage.apiKey), "triage-key");
+  assert.deepEqual(redactAgent({ id: "1", config: perCall }).config, {
+    models: { triage: { provider: "openai", model: "gpt-5-nano" }, plan: { provider: "openai", model: "gpt-5-nano" } },
+  });
 });

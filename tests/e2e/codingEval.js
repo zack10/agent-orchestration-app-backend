@@ -256,22 +256,32 @@ const runScenario = async (fixtures, scenario, runNumber) => {
   return result;
 };
 
-// Optional prices per million tokens, "input,cached input,output" (e.g. "0.25,0.025,2"), for the cost column.
-const prices = () => {
-  const values = env("E2E_PRICE_PER_MTOK", "").split(",").map(Number);
+// Optional prices per million tokens, "input,cached input,output" (e.g. "0.25,0.025,2"), for the cost column;
+// per model when calls use several: "gpt-5-mini=0.25,0.025,2;gpt-5-nano=0.05,0.005,0.4".
+const prices = (model) => {
+  const spec = env("E2E_PRICE_PER_MTOK", "");
+  const entries = spec.split(";").map((entry) => entry.split("="));
+  const own = entries.length === 1 && entries[0].length === 1 ? entries[0][0] : entries.find(([name]) => name === model)?.[1];
+  const values = (own ?? "").split(",").map(Number);
   return values.length === 3 && values.every(Number.isFinite) ? values : undefined;
 };
 
 /** All of an execution's model calls (GET /api/executions/:id usage), with cost when prices are set. */
 const usageMetrics = (usage = []) => {
   const sum = (key) => usage.reduce((total, row) => total + (row[key] ?? 0), 0);
-  const [input, cached, output] = prices() ?? [];
-  const tokens = { inputTokens: sum("inputTokens"), cachedInputTokens: sum("cachedInputTokens"), outputTokens: sum("outputTokens") };
-  return {
-    ...tokens,
-    costUsd: input === undefined
+  const rowCost = (row) => {
+    const [input, cached, output] = prices(row.model) ?? [];
+    return input === undefined
       ? undefined
-      : ((tokens.inputTokens - tokens.cachedInputTokens) * input + tokens.cachedInputTokens * cached + tokens.outputTokens * output) / 1e6,
+      : ((row.inputTokens - row.cachedInputTokens) * input + row.cachedInputTokens * cached + row.outputTokens * output) / 1e6;
+  };
+  const costs = usage.map(rowCost);
+  return {
+    inputTokens: sum("inputTokens"),
+    cachedInputTokens: sum("cachedInputTokens"),
+    outputTokens: sum("outputTokens"),
+    // No cost unless every model used has a price.
+    costUsd: costs.length && costs.every((cost) => cost !== undefined) ? costs.reduce((a, b) => a + b, 0) : undefined,
   };
 };
 
@@ -305,7 +315,7 @@ const runTokens = (result) => {
 };
 
 const totalCost = (results) =>
-  prices() ? results.reduce((sum, result) => sum + (result.costUsd ?? 0), 0) : undefined;
+  env("E2E_PRICE_PER_MTOK") ? results.reduce((sum, result) => sum + (result.costUsd ?? 0), 0) : undefined;
 
 const writeReport = (results, meta) => {
   const summary = summarize(results);
@@ -351,7 +361,7 @@ const writeReport = (results, meta) => {
         `| ${result.scenario} | ${result.run} | ${OUTCOMES[result.outcome]} | ${result.attempts ?? ""} | ${result.llmCalls ?? ""}${runTokens(result)} | ${Math.round(result.durationMs / 1000)}s | ${cell((result.files ?? []).join(", "))} | ${result.files ? `+${result.linesAdded}/-${result.linesRemoved}` : ""} | ${result.files ? (result.onlyExpectedFiles ? "yes" : "no") : ""} | ${result.files ? (result.testsAdded ? "yes" : "no") : ""} | ${result.files ? (result.testsModified ? "**yes**" : "no") : ""} | ${cell(result.note)} |`,
     ),
     "",
-    "Tokens are every model call the execution made (input + output), with the share of input read from the provider's prompt cache" + (prices() ? " and the cost at E2E_PRICE_PER_MTOK." : "; set E2E_PRICE_PER_MTOK to add cost."),
+    "Tokens are every model call the execution made (input + output), with the share of input read from the provider's prompt cache" + (env("E2E_PRICE_PER_MTOK") ? " and the cost at E2E_PRICE_PER_MTOK." : "; set E2E_PRICE_PER_MTOK to add cost."),
     ...(totalCost(results) === undefined ? [] : ["", `Total cost: $${totalCost(results).toFixed(2)}.`]),
     "",
   ];

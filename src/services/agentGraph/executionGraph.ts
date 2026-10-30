@@ -87,6 +87,7 @@ type GraphRoute =
   | undefined;
 
 type ReasoningEffortConfig = Partial<Record<ExecutionPromptName, ReasoningEffort>>;
+type CallModel = { provider: string; model: string; apiKey?: string };
 
 const ExecutionGraphState = Annotation.Root({
   executionId: Annotation<string>(),
@@ -95,8 +96,8 @@ const ExecutionGraphState = Annotation.Root({
   agentProvider: Annotation<string | undefined>(),
   agentModel: Annotation<string | undefined>(),
   agentApiKey: Annotation<string | undefined>(),
-  /** A separate model for reviewing diffs (agent config.reviewer); the agent's own if unset. */
-  reviewer: Annotation<{ provider: string; model: string; apiKey?: string } | undefined>(),
+  /** A model per kind of call (agent config.models, keyed by prompt name); the agent's own where unset. */
+  callModels: Annotation<Partial<Record<ExecutionPromptName, CallModel>>>({ reducer: (_old, value) => value, default: () => ({}) }),
   /** Reasoning effort per kind of call (agent config.reasoningEffort, keyed by prompt name). */
   reasoningEffort: Annotation<ReasoningEffortConfig>({ reducer: (_old, value) => value, default: () => ({}) }),
   ticket: Annotation<string | undefined>(),
@@ -176,10 +177,20 @@ const requireAgent = (state: GraphState) => {
   return { provider: state.agentProvider, model: state.agentModel };
 };
 
+/** The kind of call a prompt version belongs to (its EXECUTION_PROMPTS name). */
+const callKind = (version: string) =>
+  (Object.keys(EXECUTION_PROMPTS) as ExecutionPromptName[]).find((key) => EXECUTION_PROMPTS[key] === version);
+
 /** The configured effort for the call a prompt version belongs to; unset leaves the model's default. */
 const effortFor = (state: GraphState, version: string) => {
-  const name = (Object.keys(EXECUTION_PROMPTS) as ExecutionPromptName[]).find((key) => EXECUTION_PROMPTS[key] === version);
+  const name = callKind(version);
   return name ? state.reasoningEffort[name] : undefined;
+};
+
+/** The model a call runs on: the one configured for its kind, else the agent's own. */
+const modelFor = (state: GraphState, version: string): CallModel => {
+  const name = callKind(version);
+  return (name && state.callModels[name]) || { ...requireAgent(state), apiKey: state.agentApiKey };
 };
 
 /** Tokens every model call of this execution has used, from the usage ledger. */
@@ -192,13 +203,13 @@ const executionTokensUsed = (state: GraphState) =>
  * which covers the plan, review and analysis calls as well as the loop.
  */
 const askAgent = async (state: GraphState, prompt: RenderedPrompt) => {
-  const { provider, model } = requireAgent(state);
+  const { provider, model, apiKey } = modelFor(state, prompt.version);
   const used = await executionTokensUsed(state);
   if (used >= state.maxTokens)
     throw new TokenLimitError(
       `Execution token budget reached: ${used} of ${state.maxTokens} tokens used (budget.maxTokens)`,
     );
-  return llm.generateContent(provider, model, { ...prompt, reasoningEffort: effortFor(state, prompt.version) }, state.agentApiKey, {
+  return llm.generateContent(provider, model, { ...prompt, reasoningEffort: effortFor(state, prompt.version) }, apiKey, {
     purpose: prompt.version,
     executionId: state.executionId,
   });
@@ -209,23 +220,12 @@ const askAgentWithTools = (
   request: ToolRequest,
   purpose: string,
 ) => {
-  const { provider, model } = requireAgent(state);
-  return llm.generateWithTools(provider, model, { ...request, reasoningEffort: effortFor(state, purpose) }, state.agentApiKey, {
+  const { provider, model, apiKey } = modelFor(state, purpose);
+  return llm.generateWithTools(provider, model, { ...request, reasoningEffort: effortFor(state, purpose) }, apiKey, {
     purpose,
     executionId: state.executionId,
   });
 };
-
-/** The state with the reviewer's model in place of the agent's, when one is configured. */
-const asReviewer = (state: GraphState): GraphState =>
-  state.reviewer
-    ? {
-        ...state,
-        agentProvider: state.reviewer.provider,
-        agentModel: state.reviewer.model,
-        agentApiKey: state.reviewer.apiKey,
-      }
-    : state;
 
 /** The prompts a mode actually uses, recorded with every run. */
 const promptVersionsFor = (mode: ExecutionAgentMode) => {
@@ -440,7 +440,8 @@ const loadExecutionContext = async (
   const agentConfig = agent.config as
     | {
         apiKey?: string;
-        reviewer?: { provider: string; model: string; apiKey?: string };
+        reviewer?: CallModel;
+        models?: Partial<Record<ExecutionPromptName, CallModel>>;
         reasoningEffort?: ReasoningEffortConfig;
       }
     | null;
@@ -448,12 +449,18 @@ const loadExecutionContext = async (
   const agentApiKey = agentConfig?.apiKey
     ? decrypt(agentConfig.apiKey)
     : undefined;
-  const reviewer = agentConfig?.reviewer
-    ? {
-        ...llm.resolveModel(agentConfig.reviewer),
-        apiKey: agentConfig.reviewer.apiKey ? decrypt(agentConfig.reviewer.apiKey) : undefined,
-      }
-    : undefined;
+  // config.reviewer is the older form of models.review and models.reviewer.
+  const { reviewer } = agentConfig ?? {};
+  const callModels = Object.fromEntries(
+    Object.entries({ ...(reviewer ? { review: reviewer, reviewer } : {}), ...agentConfig?.models }).map(
+      ([name, entry]) => {
+        const model = llm.resolveModel(entry);
+        // Without its own key, a model of the agent's provider uses the agent's key.
+        const apiKey = entry.apiKey ? decrypt(entry.apiKey) : model.provider === resolved.provider ? agentApiKey : undefined;
+        return [name, { ...model, apiKey }];
+      },
+    ),
+  ) as Partial<Record<ExecutionPromptName, CallModel>>;
 
   // The repository's configuration or the project's own definition decides
   // the image, setup step and checks; nothing is chosen per language.
@@ -472,7 +479,7 @@ const loadExecutionContext = async (
   // Discovery's model calls count against this execution's budget.
   const ask = (prompt: RenderedPrompt) =>
     askAgent(
-      { ...state, agentProvider: resolved.provider, agentModel: resolved.model, agentApiKey, maxTokens, reasoningEffort },
+      { ...state, agentProvider: resolved.provider, agentModel: resolved.model, agentApiKey, maxTokens, reasoningEffort, callModels },
       prompt,
     );
   // Later commands run in the snapshot taken after setup and the baseline checks.
@@ -500,7 +507,9 @@ const loadExecutionContext = async (
     agentMode,
     budget: { maxSteps, maxTokens, maxDurationSeconds: (deadline - Date.now()) / 1000, attemptShare },
     promptVersions: promptVersionsFor(agentMode),
-    ...(reviewer ? { reviewer: `${reviewer.provider}/${reviewer.model}` } : {}),
+    ...(Object.keys(callModels).length
+      ? { callModels: Object.fromEntries(Object.entries(callModels).map(([name, entry]) => [name, `${entry.provider}/${entry.model}`])) }
+      : {}),
     ...(Object.keys(reasoningEffort).length ? { reasoningEffort } : {}),
   });
 
@@ -510,7 +519,7 @@ const loadExecutionContext = async (
     agentProvider: resolved.provider,
     agentModel: resolved.model,
     agentApiKey,
-    reviewer,
+    callModels,
     reasoningEffort,
     ticket: `${execution.workItem.title}\n${execution.workItem.description ?? ""}`,
     agentMode,
@@ -989,7 +998,7 @@ const reviewWithTools = async (
   const ctx = await executionToolContext(state.executionId, execution.repository, requireToolchain(state));
   const prompt = renderExecutionPrompt("reviewer", input);
   const review = await runReviewer(ctx, prompt, {
-    generate: (request) => askAgentWithTools(asReviewer(state), request, prompt.version),
+    generate: (request) => askAgentWithTools(state, request, prompt.version),
     recorder: prismaToolCallRecorder(attemptId),
     maxTokens: Math.min(REVIEW_MAX_TOKENS, Math.max(0, state.maxTokens - (await executionTokensUsed(state)))),
     deadline: state.deadline,
@@ -1046,7 +1055,7 @@ const reviewDiff = async (state: typeof ExecutionGraphState.State) => {
     ({ prompt, review } = await reviewWithTools(state, reviewInput));
   } else {
     prompt = renderExecutionPrompt("review", reviewInput);
-    const parsed = parseJsonRecord(await askAgent(asReviewer(state), prompt));
+    const parsed = parseJsonRecord(await askAgent(state, prompt));
     review = {
       approved: parsed.approved === true,
       issues: Array.isArray(parsed.issues)
