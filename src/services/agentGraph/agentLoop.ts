@@ -198,6 +198,9 @@ export const runAgentLoop = async (
   const keepRecent = input.keepRecentResults ?? KEEP_RECENT_RESULTS;
   const messages: ChatMessage[] = [{ role: "user", content: input.task }];
   const usage = { inputTokens: 0, outputTokens: 0 };
+  // The last call's tokens: the next one costs at least as much, since the
+  // conversation only grows.
+  let lastStepTokens = 0;
   let steps = 0;
   let nudges = 0;
   let warned = false;
@@ -267,8 +270,12 @@ export const runAgentLoop = async (
     }
 
     steps++;
+    const used = usage.inputTokens + usage.outputTokens;
+    // Also the last call when this one and the next would not both fit.
     const lastCall =
-      steps >= budget.maxSteps || usage.inputTokens + usage.outputTokens >= budget.maxTokens * BUDGET_WARNING_SHARE;
+      steps >= budget.maxSteps ||
+      used >= budget.maxTokens * BUDGET_WARNING_SHARE ||
+      used + 2 * lastStepTokens > budget.maxTokens;
     const turn = await deps.generate({
       system: input.system,
       messages: compactMessages(messages, keepRecent),
@@ -276,6 +283,7 @@ export const runAgentLoop = async (
     });
     usage.inputTokens += turn.usage?.inputTokens ?? 0;
     usage.outputTokens += turn.usage?.outputTokens ?? 0;
+    lastStepTokens = (turn.usage?.inputTokens ?? 0) + (turn.usage?.outputTokens ?? 0);
     messages.push(turn.message);
     const stepUsage = { inputTokens: turn.usage?.inputTokens ?? 0, outputTokens: turn.usage?.outputTokens ?? 0 };
 

@@ -365,13 +365,28 @@ test("finalTools are the only tools offered on the last step and past the token 
     ["verdict"],
   ]);
 
-  // 110 tokens per call: 80% of 400 (320) is passed after the third call; the fifth is over budget.
+  // 110 tokens per call, 400 in all: after two calls (220) the third and a fourth would not both fit.
   const byTokens = scriptedModel([{ calls: [["read_file", { path: "a" }]] }]);
   await runAgentLoop(input({ tools: [read, verdict], finalTools: [verdict], budget: budget({ maxTokens: 400 }) }), {
     ...byTokens,
     ...fakeTools(),
   });
-  assert.deepEqual(byTokens.requests.map((request) => request.tools.length), [2, 2, 2, 1]);
+  assert.deepEqual(byTokens.requests.map((request) => request.tools.length), [2, 2, 1, 1]);
+});
+
+test("steps that grow (large file reads) still reach a final step before the budget runs out", async () => {
+  const read = { name: "read_file" };
+  const verdict = { name: "verdict" };
+  // 5k, 10k, 15k, 20k tokens: after three calls 30k of 40k is used, under the 80% warning,
+  // and the fourth call would end the loop over budget without a verdict.
+  const model = scriptedModel([{ calls: [["read_file", { path: "big" }]] }]);
+  let call = 0;
+  const generate = async (request) => ({ ...(await model.generate(request)), usage: { inputTokens: 5000 * ++call, outputTokens: 0 } });
+  await runAgentLoop(input({ tools: [read, verdict], finalTools: [verdict], budget: budget({ maxTokens: 40_000 }) }), {
+    generate,
+    ...fakeTools(),
+  });
+  assert.deepEqual(model.requests.map((request) => request.tools.length), [2, 2, 2, 1]);
 });
 
 test("keepRecentResults keeps more tool results in full", async () => {
