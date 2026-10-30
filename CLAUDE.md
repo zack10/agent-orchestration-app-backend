@@ -14,6 +14,7 @@ npm test                        # build, then node:test over tests/*.test.js
 npm run verify                  # lint + test
 npm run test:e2e                # tests/e2e/* against a RUNNING server, env from .env.e2e (see .env.e2e.example)
 npm run eval:coding -- --check  # coding benchmark setup check; drop --check to run it (rewrites the sandbox repo's main)
+npm run eval:reviewer           # replays stored approved diffs through the reviewer alone, graded by hidden tests (--model X to compare)
 
 npm run prisma:migrate:local    # create/apply a migration against .env.local DB
 npm run prisma:migrate:deploy   # apply committed migrations (deploy)

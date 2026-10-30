@@ -189,6 +189,10 @@ const runScenario = async (fixtures, scenario, runNumber) => {
         expectStatus: 200,
       });
 
+      // Attempts ran out with the reviewer still objecting; the approver sees its objections.
+      const objections = artifact.metadata?.reviewObjections ?? [];
+      const objected = objections.length ? `reviewer objected: ${objections.join(" / ").slice(0, 200)}` : "";
+
       const stats = diffStats(diff);
       result.files = stats.files;
       result.linesAdded = stats.added;
@@ -216,6 +220,7 @@ const runScenario = async (fixtures, scenario, runNumber) => {
           result.gradeOutput = graded.output.slice(-1500);
         }
       }
+      if (objected) result.note = [result.note, objected].filter(Boolean).join("; ");
     } else if (execution.status === "BLOCKED") {
       result.outcome = scenario.expect === "blocked" ? "correctly_blocked" : "no_fix";
       result.note = (execution.lastError ?? "").replace(/\s+/g, " ").slice(0, 200);

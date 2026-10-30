@@ -20,7 +20,8 @@ import { LLMService } from "../llm/LLMService";
 import { ToolRequest } from "../llm/types";
 import { TokenLimitError, prismaUsageLedger } from "../llm/usageLedger";
 import { DurableCheckpointSaver, prismaCheckpointStore } from "./checkpointer";
-import { REVIEW_TOOLS, ReviewVerdict, SANDBOX_TOOLS, describeReproduction } from "../sandbox/tools";
+import { ReviewVerdict, SANDBOX_TOOLS, describeReproduction } from "../sandbox/tools";
+import { REVIEW_MAX_TOKENS, reviewOutcome, runReviewer } from "./reviewer";
 import {
   executionToolContext,
   prismaToolCallRecorder,
@@ -154,6 +155,8 @@ const ExecutionGraphState = Annotation.Root({
   // How the tool loop showed the problem before changing code, for the reviewer.
   /** The reviewer's non-blocking remarks on the approved diff, shown with it. */
   reviewSuggestions: Annotation<string[]>({ reducer: (_old, value) => value, default: () => [] }),
+  // Issues the reviewer still raised when attempts ran out, shown to the approver.
+  reviewObjections: Annotation<string[]>({ reducer: (_old, value) => value, default: () => [] }),
   reproduction: Annotation<string>({
     reducer: (_current, update) => update,
     default: () => "Not tracked: the change was made without tools.",
@@ -955,77 +958,39 @@ const analyzeFailure = async (state: typeof ExecutionGraphState.State) => {
   return { lastFailure: guidance };
 };
 
-// The reviewer reads callers and the code the ticket is about; a few
-// searches and reads per changed file fit comfortably.
-const REVIEW_MAX_STEPS = 15;
-// Its own cap, so a wandering review cannot spend the attempt's budget.
-const REVIEW_MAX_TOKENS = 40_000;
-// Reviews are short: keep every read in full so files are not read twice.
-const REVIEW_KEEP_RESULTS = REVIEW_MAX_STEPS;
-const VERDICT_TOOL = REVIEW_TOOLS.filter((tool) => tool.name === "verdict");
-const REVIEW_REMINDERS = {
-  nudge: "Continue by calling a tool. When you have decided, call verdict.",
-  budgetWarning: (used: string) =>
-    `[Budget: ${used}. Call verdict now with what you have found; without a verdict the change is rejected.]`,
-};
-
-/**
- * A short read-only agent loop over the changed repository that ends with
- * the verdict tool. It fails closed: no verdict is a rejection.
- */
-const reviewWithTools = async (state: GraphState, prompt: RenderedPrompt): Promise<ReviewVerdict> => {
+const reviewWithTools = async (
+  state: GraphState,
+  input: Record<string, string>,
+): Promise<{ prompt: RenderedPrompt; review: ReviewVerdict }> => {
   if (!state.attemptId) throw new Error("Execution graph is missing attempt");
+  const attemptId = state.attemptId;
   const execution = await prisma.execution.findUniqueOrThrow({
     where: { id: state.executionId },
     include: { repository: true },
   });
   const ctx = await executionToolContext(state.executionId, execution.repository, requireToolchain(state));
-  const recorder = prismaToolCallRecorder(state.attemptId);
-  let verdict: ReviewVerdict | undefined;
-  const outcome = await runAgentLoop(
-    {
-      system: prompt.system,
-      task: prompt.user,
-      tools: REVIEW_TOOLS,
-      budget: {
-        maxSteps: REVIEW_MAX_STEPS,
-        maxTokens: Math.min(REVIEW_MAX_TOKENS, Math.max(0, state.maxTokens - (await executionTokensUsed(state)))),
-        deadline: state.deadline,
-      },
-      reminders: REVIEW_REMINDERS,
-      finalTools: VERDICT_TOOL,
-      keepRecentResults: REVIEW_KEEP_RESULTS,
-    },
-    {
-      generate: (request) => askAgentWithTools(asReviewer(state), request, prompt.version),
-      runTool: async (call) => {
-        const result = await runRecordedTool(ctx, call, recorder, REVIEW_TOOLS);
-        verdict ??= result.verdict;
-        return result;
-      },
-      onStep: (step) =>
-        graphEvent(state.executionId, "GRAPH_REVIEW_STEP", {
-          attemptId: state.attemptId,
-          step: step.step,
-          promptVersion: prompt.version,
-          text: step.text.slice(0, MAX_EVENT_TEXT_CHARS),
-          usage: step.usage,
-          toolCalls: step.toolCalls.map(({ call, outcome: result }) => ({
-            name: call.name,
-            status: result.status,
-            input: JSON.stringify(call.arguments).slice(0, MAX_EVENT_PREVIEW_CHARS),
-            output: result.output.slice(0, MAX_EVENT_PREVIEW_CHARS),
-          })),
-        }),
-    },
-  );
-  return (
-    verdict ?? {
-      approved: false,
-      issues: [`The reviewer did not reach a verdict: ${outcome.summary}`],
-      summary: outcome.summary,
-    }
-  );
+  const prompt = renderExecutionPrompt("reviewer", input);
+  const review = await runReviewer(ctx, prompt, {
+    generate: (request) => askAgentWithTools(asReviewer(state), request, prompt.version),
+    recorder: prismaToolCallRecorder(attemptId),
+    maxTokens: Math.min(REVIEW_MAX_TOKENS, Math.max(0, state.maxTokens - (await executionTokensUsed(state)))),
+    deadline: state.deadline,
+    onStep: (step) =>
+      graphEvent(state.executionId, "GRAPH_REVIEW_STEP", {
+        attemptId,
+        step: step.step,
+        promptVersion: prompt.version,
+        text: step.text.slice(0, MAX_EVENT_TEXT_CHARS),
+        usage: step.usage,
+        toolCalls: step.toolCalls.map(({ call, outcome: result }) => ({
+          name: call.name,
+          status: result.status,
+          input: JSON.stringify(call.arguments).slice(0, MAX_EVENT_PREVIEW_CHARS),
+          output: result.output.slice(0, MAX_EVENT_PREVIEW_CHARS),
+        })),
+      }),
+  });
+  return { prompt, review };
 };
 
 const reviewDiff = async (state: typeof ExecutionGraphState.State) => {
@@ -1060,8 +1025,7 @@ const reviewDiff = async (state: typeof ExecutionGraphState.State) => {
   let prompt: RenderedPrompt;
   let review: ReviewVerdict;
   if (state.agentMode === "tool_loop") {
-    prompt = renderExecutionPrompt("reviewer", reviewInput);
-    review = await reviewWithTools(state, prompt);
+    ({ prompt, review } = await reviewWithTools(state, reviewInput));
   } else {
     prompt = renderExecutionPrompt("review", reviewInput);
     const parsed = parseJsonRecord(await askAgent(asReviewer(state), prompt));
@@ -1073,27 +1037,23 @@ const reviewDiff = async (state: typeof ExecutionGraphState.State) => {
       summary: String(parsed.summary ?? "Diff reviewer approved the change."),
     };
   }
-  const { approved, issues } = review;
-  // A rejection with no issue listed still needs feedback for the next attempt.
-  if (!approved && issues.length === 0) issues.push(review.summary);
-
-  if (!approved) {
-    const feedback = issues.join("\n");
-    await prisma.taskAttempt.update({
-      where: { id: state.attemptId },
-      data: { status: "FAILED", error: feedback, completedAt: new Date() },
-    });
+  const outcome = reviewOutcome(review, canRetry(state));
+  if (!review.approved) {
+    const issues = review.issues.length ? review.issues : [review.summary];
+    if (outcome.route === "retry")
+      await prisma.taskAttempt.update({
+        where: { id: state.attemptId },
+        data: { status: "FAILED", error: outcome.lastFailure, completedAt: new Date() },
+      });
     await graphEvent(state.executionId, "GRAPH_DIFF_REVIEW_FAILED", {
       attemptId: state.attemptId,
       issues,
       suggestions: review.suggestions ?? [],
       checks: review.checks,
       promptVersion: prompt.version,
+      handedToApprover: outcome.route === "artifact",
     });
-    return {
-      lastFailure: feedback,
-      route: canRetry(state) ? "retry" : "blocked",
-    };
+    return outcome;
   }
 
   await graphEvent(state.executionId, "GRAPH_DIFF_REVIEW_PASSED", {
@@ -1103,7 +1063,7 @@ const reviewDiff = async (state: typeof ExecutionGraphState.State) => {
     checks: review.checks,
     promptVersion: prompt.version,
   });
-  return { route: "artifact" as GraphRoute, reviewSuggestions: review.suggestions ?? [] };
+  return outcome;
 };
 
 const blockExecution = async (state: typeof ExecutionGraphState.State) => {
@@ -1154,6 +1114,7 @@ const createDiffArtifact = async (state: typeof ExecutionGraphState.State) => {
           ...state.verification,
           ...(state.environmentProposal ? { environmentProposal: state.environmentProposal } : {}),
           ...(state.reviewSuggestions.length ? { reviewSuggestions: state.reviewSuggestions } : {}),
+          ...(state.reviewObjections.length ? { reviewObjections: state.reviewObjections } : {}),
         } as unknown as Prisma.InputJsonObject,
       },
     }),
