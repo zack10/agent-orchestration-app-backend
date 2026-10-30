@@ -71,8 +71,11 @@ const DEFAULT_GRACE_STEPS = 3;
 const wrapUp = (steps: number) =>
   `[This attempt has used its share of the budget. You have ${steps} more steps: do not explore further. Run the checks on your change and call finish; if it is not complete, finish with what you have and say what is left.]`;
 
-// Tool results older than the most recent KEEP_RECENT_RESULTS are shortened
-// to a stub; the model can call the tool again if it needs them.
+// At least the most recent KEEP_RECENT_RESULTS tool results are shown in
+// full; older ones are shortened to a stub, and the model can call the tool
+// again if it needs them. Shortening happens in batches of that size, not one
+// result per step: between batches the conversation only grows at the end,
+// so providers can serve the unchanged start from their prompt cache.
 const KEEP_RECENT_RESULTS = 8;
 const STUB_THRESHOLD_CHARS = 400;
 
@@ -95,15 +98,27 @@ interface SeenResult {
   count: number;
 }
 
+/** How many of `total` tool results, oldest first, are shortened: whole batches once 2 x keepRecent have built up. */
+const shortenedResults = (total: number, keepRecent: number) =>
+  total < 2 * keepRecent ? 0 : Math.floor((total - keepRecent) / keepRecent) * keepRecent;
+
+/** Position of each tool result among the tool results, by message index. */
+const toolPositions = (messages: ChatMessage[]) => {
+  const positions = new Map<number, number>();
+  messages.forEach((message, index) => {
+    if (message.role === "tool") positions.set(index, positions.size);
+  });
+  return positions;
+};
+
 /**
  * Whether the tool result at `index` will still be shown in full once one
  * more tool result is added (see compactMessages).
  */
 const stillShownInFull = (messages: ChatMessage[], index: number, keepRecent = KEEP_RECENT_RESULTS) => {
   if (messages[index].content.length <= STUB_THRESHOLD_CHARS) return true;
-  let later = 1;
-  for (let next = index + 1; next < messages.length; next++) if (messages[next].role === "tool") later++;
-  return later < keepRecent;
+  const positions = toolPositions(messages);
+  return (positions.get(index) ?? 0) >= shortenedResults(positions.size + 1, keepRecent);
 };
 
 /**
@@ -115,15 +130,11 @@ export const compactMessages = (
   messages: ChatMessage[],
   keepRecent = KEEP_RECENT_RESULTS,
 ): ChatMessage[] => {
-  let recent = 0;
-  const keep = new Set<number>();
-  for (let index = messages.length - 1; index >= 0 && recent < keepRecent; index--)
-    if (messages[index].role === "tool") {
-      keep.add(index);
-      recent++;
-    }
+  const positions = toolPositions(messages);
+  const shortened = shortenedResults(positions.size, keepRecent);
   return messages.map((message, index) => {
-    if (message.role !== "tool" || keep.has(index) || message.content.length <= STUB_THRESHOLD_CHARS)
+    const position = positions.get(index);
+    if (message.role !== "tool" || position === undefined || position >= shortened || message.content.length <= STUB_THRESHOLD_CHARS)
       return message;
     const firstLine = message.content.split("\n", 1)[0].slice(0, 200);
     return {

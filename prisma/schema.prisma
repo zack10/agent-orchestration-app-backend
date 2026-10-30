@@ -386,15 +386,18 @@ model TaskAttempt {
 /// One model call's token usage. No foreign keys: deleting an execution or
 /// task must not reduce today's total, which the daily limit is checked against.
 model LlmUsage {
-  id           String   @id @default(uuid())
-  provider     String
-  model        String
-  purpose      String
-  inputTokens  Int
-  outputTokens Int
-  executionId  String?
-  taskId       String?
-  createdAt    DateTime @default(now())
+  id                String   @id @default(uuid())
+  provider          String
+  model             String
+  purpose           String
+  inputTokens       Int
+  outputTokens      Int
+  // Parts of the two above: input read from the prompt cache, output spent on reasoning.
+  cachedInputTokens Int      @default(0)
+  reasoningTokens   Int      @default(0)
+  executionId       String?
+  taskId            String?
+  createdAt         DateTime @default(now())
 
   @@index([createdAt])
   @@index([executionId])

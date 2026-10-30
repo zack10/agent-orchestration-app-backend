@@ -2,12 +2,27 @@ import axios from "axios";
 import { config } from "../../../config";
 import { LLMOutputError } from "../errors";
 import { groupMessages, replayable } from "../toolMessages";
-import { LLMProvider, Model, TextResult, ToolRequest, ToolTurn, UsageStats } from "../types";
+import { LLMProvider, Model, TextResult, TokenUsage, ToolRequest, ToolTurn, UsageStats } from "../types";
 
 interface AnthropicModel {
   id: string;
   display_name?: string;
 }
+
+interface MessagesUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
+// input_tokens excludes cache reads and writes; inputTokens counts all input, as for other providers.
+const tokenUsage = (usage: MessagesUsage | undefined): TokenUsage => ({
+  inputTokens:
+    (usage?.input_tokens ?? 0) + (usage?.cache_read_input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0),
+  outputTokens: usage?.output_tokens ?? 0,
+  cachedInputTokens: usage?.cache_read_input_tokens ?? 0,
+});
 
 export class AnthropicProvider implements LLMProvider {
   private readonly apiKey = process.env.ANTHROPIC_API_KEY || "";
@@ -66,7 +81,7 @@ export class AnthropicProvider implements LLMProvider {
     const data = response.data as {
       stop_reason?: string;
       content?: Array<{ type: string; text?: string }>;
-      usage?: { input_tokens?: number; output_tokens?: number };
+      usage?: MessagesUsage;
     };
     if (data.stop_reason === "max_tokens")
       throw new LLMOutputError("Anthropic", "truncated at max_tokens");
@@ -79,10 +94,7 @@ export class AnthropicProvider implements LLMProvider {
     if (!text.trim()) throw new LLMOutputError("Anthropic", "empty response");
     return {
       text,
-      usage: {
-        inputTokens: data.usage?.input_tokens ?? 0,
-        outputTokens: data.usage?.output_tokens ?? 0,
-      },
+      usage: tokenUsage(data.usage),
     };
   }
 
@@ -130,6 +142,14 @@ export class AnthropicProvider implements LLMProvider {
       })),
     };
     if (request.system) payload.system = request.system;
+    // Anthropic caches only up to a marked block: mark the end of the request,
+    // so the next call in the loop reads tools, system and history from cache.
+    const last = messages[messages.length - 1] as unknown as { content: string | Array<Record<string, unknown>> } | undefined;
+    if (last) {
+      const blocks = typeof last.content === "string" ? [{ type: "text", text: last.content }] : [...last.content];
+      if (blocks.length) blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], cache_control: { type: "ephemeral" } };
+      last.content = blocks;
+    }
 
     const response = await axios.post("https://api.anthropic.com/v1/messages", payload, {
       timeout: config.llmRequestTimeoutMs,
@@ -142,7 +162,7 @@ export class AnthropicProvider implements LLMProvider {
     const data = response.data as {
       stop_reason?: string;
       content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
-      usage?: { input_tokens?: number; output_tokens?: number };
+      usage?: MessagesUsage;
     };
     if (data.stop_reason === "max_tokens")
       throw new LLMOutputError("Anthropic", "truncated at max_tokens");
@@ -172,10 +192,7 @@ export class AnthropicProvider implements LLMProvider {
       text,
       toolCalls,
       stopReason: toolCalls.length > 0 ? "tool_use" : "end_turn",
-      usage: {
-        inputTokens: data.usage?.input_tokens ?? 0,
-        outputTokens: data.usage?.output_tokens ?? 0,
-      },
+      usage: tokenUsage(data.usage),
     };
   }
 

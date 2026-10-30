@@ -151,7 +151,7 @@ test("a repeated call whose result changed, or whose earlier copy is shortened, 
     { calls: [["read_file", { path: "a.js" }]] },
     { calls: [["edit_file", { path: "a.js" }]] },
     { calls: [["read_file", { path: "a.js" }]] },
-    ...Array.from({ length: 8 }, (_, i) => ({ calls: [["read_file", { path: `other${i}.js` }]] })),
+    ...Array.from({ length: 14 }, (_, i) => ({ calls: [["read_file", { path: `other${i}.js` }]] })),
     { calls: [["read_file", { path: "a.js" }]] },
     { calls: [["finish", { status: "done", summary: "ok" }]] },
   ]);
@@ -164,7 +164,7 @@ test("a repeated call whose result changed, or whose earlier copy is shortened, 
 
   const results = model.requests.at(-1).messages.filter((m) => m.role === "tool").map((m) => m.content);
   assert.match(results[2], /^a\.js v2\n/, "the file changed, so it is shown again");
-  // Eight other results later, the step-3 copy is shortened, so it is sent in full again.
+  // Fourteen other results later the step-3 copy is in a shortened batch (18 results, 8 shortened), so it is sent in full again.
   assert.match(results.at(-1), /^a\.js v2\nx{500}$/);
 });
 
@@ -299,24 +299,37 @@ test("a reply without tool calls gets a reminder, then the loop gives up", async
   assert.equal((await runAgentLoop(input(), { ...recovered, ...fakeTools() })).stopReason, "done");
 });
 
-test("old tool output is shortened, recent output and pairing are kept", () => {
+test("old tool output is shortened in batches; recent output and pairing are kept", () => {
   const long = (name) => `${name} header\n${"x".repeat(1000)}`;
-  const messages = [{ role: "user", content: "task" }];
-  for (let i = 0; i < 4; i++) {
-    messages.push({ role: "assistant", content: "", toolCalls: [{ id: `t${i}`, name: "read_file", arguments: {} }], raw: { provider: "p", content: [i] } });
-    messages.push({ role: "tool", toolCallId: `t${i}`, name: "read_file", content: long(`file${i}`) });
-  }
-  messages.push({ role: "tool", toolCallId: "short", name: "run_check", content: "short output" });
+  const conversation = (results) => {
+    const messages = [{ role: "user", content: "task" }];
+    for (let i = 0; i < results; i++) {
+      messages.push({ role: "assistant", content: "", toolCalls: [{ id: `t${i}`, name: "read_file", arguments: {} }], raw: { provider: "p", content: [i] } });
+      messages.push({ role: "tool", toolCallId: `t${i}`, name: "read_file", content: long(`file${i}`) });
+    }
+    return messages;
+  };
 
-  const compacted = compactMessages(messages, 3);
-  assert.equal(compacted.length, messages.length, "nothing is removed");
+  // keep 3: nothing is shortened until 6 results have built up.
+  const five = conversation(5);
+  assert.deepEqual(compactMessages(five, 3), five, "below two batches nothing changes");
+
+  const six = conversation(6);
+  six.push({ role: "tool", toolCallId: "short", name: "run_check", content: "short output" });
+  const compacted = compactMessages(six, 3);
+  assert.equal(compacted.length, six.length, "nothing is removed");
   assert.match(compacted[2].content, /^file0 header\n\[older read_file output removed/);
-  assert.match(compacted[4].content, /removed/);
-  assert.equal(compacted[6].content, long("file2"), "the three most recent results stay whole");
-  assert.equal(compacted[9].content, "short output");
+  assert.match(compacted[6].content, /removed/, "the oldest batch of three is shortened together");
+  assert.equal(compacted[8].content, long("file3"), "the most recent results stay whole");
+  assert.equal(compacted[13].content, "short output");
   assert.equal(compacted[2].toolCallId, "t0");
   assert.deepEqual(compacted[1].raw, { provider: "p", content: [0] }, "assistant turns keep their raw reply");
-  assert.equal(messages[2].content, long("file0"), "the input is not modified");
+  assert.equal(six[2].content, long("file0"), "the input is not modified");
+
+  // Until the next batch, earlier messages stay exactly the same, so a provider's prompt cache keeps matching.
+  const at = (results) => compactMessages(conversation(results), 3);
+  for (const results of [7, 8]) assert.deepEqual(at(results).slice(0, at(6).length), at(6), `unchanged at ${results} results`);
+  assert.match(at(9)[8].content, /removed/, "the next batch is shortened at 9 results");
 });
 
 test("the agent prompt gets the environment and keeps ticket text out of the system prompt", () => {

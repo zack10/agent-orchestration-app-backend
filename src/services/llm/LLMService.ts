@@ -101,6 +101,8 @@ export class LLMService {
         taskId: context?.taskId,
         inputTokens: usage?.inputTokens ?? 0,
         outputTokens: usage?.outputTokens ?? 0,
+        cachedInputTokens: usage?.cachedInputTokens ?? 0,
+        reasoningTokens: usage?.reasoningTokens ?? 0,
       });
     } catch (error) {
       console.error(`Recording LLM usage failed: ${describeError(error)}`);

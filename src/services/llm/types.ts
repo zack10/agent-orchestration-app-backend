@@ -59,8 +59,14 @@ export interface ToolRequest {
 }
 
 export interface TokenUsage {
+  /** All input tokens, including those served from the provider's cache. */
   inputTokens: number;
+  /** All output tokens, including reasoning. */
   outputTokens: number;
+  /** Input tokens read from the provider's prompt cache (billed at a discount). */
+  cachedInputTokens?: number;
+  /** Output tokens spent on reasoning. */
+  reasoningTokens?: number;
 }
 
 export interface TextResult {

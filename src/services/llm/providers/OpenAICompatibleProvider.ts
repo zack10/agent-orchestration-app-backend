@@ -1,7 +1,7 @@
 import axios from "axios";
 import { config } from "../../../config";
 import { LLMOutputError } from "../errors";
-import { LLMProvider, Model, TextResult, ToolRequest, ToolTurn, UsageStats } from "../types";
+import { LLMProvider, Model, TextResult, TokenUsage, ToolRequest, ToolTurn, UsageStats } from "../types";
 
 interface OpenAIModel {
   id: string;
@@ -32,6 +32,20 @@ const KNOWN_MODELS: Record<string, { ctx: number; max: number }> = {
  * format. One instance per configured profile, so several vendors can be
  * used side by side without new code.
  */
+interface ChatUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+  completion_tokens_details?: { reasoning_tokens?: number };
+}
+
+const tokenUsage = (usage: ChatUsage | undefined): TokenUsage => ({
+  inputTokens: usage?.prompt_tokens ?? 0,
+  outputTokens: usage?.completion_tokens ?? 0,
+  cachedInputTokens: usage?.prompt_tokens_details?.cached_tokens ?? 0,
+  reasoningTokens: usage?.completion_tokens_details?.reasoning_tokens ?? 0,
+});
+
 export class OpenAICompatibleProvider implements LLMProvider {
   constructor(private readonly profile: OpenAICompatibleProfile) {}
 
@@ -115,16 +129,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       throw new LLMOutputError(label, "blocked by content filter");
     const text = choice?.message?.content ?? "";
     if (!text.trim()) throw new LLMOutputError(label, "empty response");
-    const usage = response.data.usage as
-      | { prompt_tokens?: number; completion_tokens?: number }
-      | undefined;
-    return {
-      text,
-      usage: {
-        inputTokens: usage?.prompt_tokens ?? 0,
-        outputTokens: usage?.completion_tokens ?? 0,
-      },
-    };
+    return { text, usage: tokenUsage(response.data.usage as ChatUsage | undefined) };
   }
 
   async generateWithTools(
@@ -182,7 +187,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
           tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
         };
       }>;
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
+      usage?: ChatUsage;
     };
     const choice = data.choices?.[0];
     if (choice?.finish_reason === "length")
@@ -212,10 +217,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       text,
       toolCalls,
       stopReason: toolCalls.length > 0 ? "tool_use" : "end_turn",
-      usage: {
-        inputTokens: data.usage?.prompt_tokens ?? 0,
-        outputTokens: data.usage?.completion_tokens ?? 0,
-      },
+      usage: tokenUsage(data.usage),
     };
   }
 

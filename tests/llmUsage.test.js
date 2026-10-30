@@ -51,8 +51,8 @@ test("every call's tokens are recorded with what it was for", async (t) => {
   await llm.generateContent("local", "llama3", { user: "hi" }, undefined, { purpose: "plan.v1", executionId: "e1" });
   await llm.generateContent("local", "llama3", { user: "hi" });
   assert.deepEqual(ledger.entries, [
-    { provider: "local", model: "llama3", purpose: "plan.v1", executionId: "e1", taskId: undefined, inputTokens: 300, outputTokens: 50 },
-    { provider: "local", model: "llama3", purpose: "unattributed", executionId: undefined, taskId: undefined, inputTokens: 300, outputTokens: 50 },
+    { provider: "local", model: "llama3", purpose: "plan.v1", executionId: "e1", taskId: undefined, inputTokens: 300, outputTokens: 50, cachedInputTokens: 0, reasoningTokens: 0 },
+    { provider: "local", model: "llama3", purpose: "unattributed", executionId: undefined, taskId: undefined, inputTokens: 300, outputTokens: 50, cachedInputTokens: 0, reasoningTokens: 0 },
   ]);
 });
 

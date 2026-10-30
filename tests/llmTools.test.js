@@ -75,13 +75,13 @@ test("Anthropic: tool_use round trip, with thinking blocks replayed unchanged", 
     {
       stop_reason: "tool_use",
       content: [thinking, { type: "tool_use", id: "toolu_1", name: "read_file", input: { path: "src/a.js" } }],
-      usage: { input_tokens: 120, output_tokens: 30 },
+      usage: { input_tokens: 20, cache_read_input_tokens: 90, cache_creation_input_tokens: 10, output_tokens: 30 },
     },
     { stop_reason: "end_turn", content: [{ type: "text", text: "It exports a." }], usage: { input_tokens: 160, output_tokens: 8 } },
   ]);
   const turns = await roundTrip("anthropic", "claude-haiku-5-5");
   expectSameOutcome(turns, "toolu_1");
-  assert.deepEqual(turns.first.usage, { inputTokens: 120, outputTokens: 30 });
+  assert.deepEqual(turns.first.usage, { inputTokens: 120, outputTokens: 30, cachedInputTokens: 90 }, "cache reads and writes count as input");
 
   const [request1, request2] = bodies.map((entry) => entry.body);
   assert.equal(bodies[0].url, "https://api.anthropic.com/v1/messages");
@@ -93,9 +93,13 @@ test("Anthropic: tool_use round trip, with thinking blocks replayed unchanged", 
     role: "assistant",
     content: [thinking, { type: "tool_use", id: "toolu_1", name: "read_file", input: { path: "src/a.js" } }],
   });
+  // The last block is marked for Anthropic's prompt cache; earlier messages are sent unchanged.
+  const cache = { type: "ephemeral" };
+  assert.deepEqual(request1.messages[0], { role: "user", content: [{ type: "text", text: ask.content, cache_control: cache }] });
+  assert.deepEqual(request2.messages[0], { role: "user", content: ask.content });
   assert.deepEqual(request2.messages[2], {
     role: "user",
-    content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "module.exports = { a };" }],
+    content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "module.exports = { a };", cache_control: cache }],
   });
 });
 
@@ -104,13 +108,13 @@ test("Gemini: functionCall round trip, with thought signatures replayed unchange
   const bodies = scripted(t, [
     {
       candidates: [{ finishReason: "STOP", content: { role: "model", parts: [callPart] } }],
-      usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20, thoughtsTokenCount: 15 },
+      usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20, thoughtsTokenCount: 15, cachedContentTokenCount: 40 },
     },
     { candidates: [{ finishReason: "STOP", content: { role: "model", parts: [{ text: "It exports a." }] } }] },
   ]);
   const turns = await roundTrip("gemini", "gemini-flash-latest");
   expectSameOutcome(turns, "call-0");
-  assert.deepEqual(turns.first.usage, { inputTokens: 100, outputTokens: 35 }, "thinking tokens count as output");
+  assert.deepEqual(turns.first.usage, { inputTokens: 100, outputTokens: 35, cachedInputTokens: 40, reasoningTokens: 15 }, "thinking tokens count as output");
 
   const [request1, request2] = bodies.map((entry) => entry.body);
   assert.deepEqual(request1.system_instruction, { parts: [{ text: "Be brief." }] });
@@ -136,13 +140,13 @@ test("OpenAI-compatible chat completions: tool_calls round trip", async (t) => {
           },
         },
       ],
-      usage: { prompt_tokens: 90, completion_tokens: 12 },
+      usage: { prompt_tokens: 90, completion_tokens: 12, prompt_tokens_details: { cached_tokens: 64 }, completion_tokens_details: { reasoning_tokens: 5 } },
     },
     { choices: [{ finish_reason: "stop", message: { content: "It exports a." } }] },
   ]);
   const turns = await roundTrip("groq", "llama-3.3-70b");
   expectSameOutcome(turns, "call_9");
-  assert.deepEqual(turns.first.usage, { inputTokens: 90, outputTokens: 12 });
+  assert.deepEqual(turns.first.usage, { inputTokens: 90, outputTokens: 12, cachedInputTokens: 64, reasoningTokens: 5 });
 
   const [request1, request2] = bodies.map((entry) => entry.body);
   assert.deepEqual(request1.messages[0], { role: "system", content: "Be brief." });
@@ -237,7 +241,7 @@ test("several results for one turn travel together; errors are marked", async (t
   assert.equal(messages.length, 3);
   assert.deepEqual(messages[2].content, [
     { type: "tool_result", tool_use_id: "t1", content: "A" },
-    { type: "tool_result", tool_use_id: "t2", content: "no such file", is_error: true },
+    { type: "tool_result", tool_use_id: "t2", content: "no such file", is_error: true, cache_control: { type: "ephemeral" } },
   ]);
 });
 

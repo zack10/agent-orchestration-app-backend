@@ -2,7 +2,7 @@ import axios from "axios";
 import { config } from "../../../config";
 import { LLMOutputError } from "../errors";
 import { groupMessages, replayable } from "../toolMessages";
-import { LLMProvider, Model, TextResult, ToolRequest, ToolTurn, UsageStats } from "../types";
+import { LLMProvider, Model, TextResult, TokenUsage, ToolRequest, ToolTurn, UsageStats } from "../types";
 
 // environment variable: GEMINI_API_KEY
 
@@ -14,6 +14,21 @@ interface GeminiModel {
   inputTokenLimit?: number;
   outputTokenLimit?: number;
 }
+
+interface UsageMetadata {
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  thoughtsTokenCount?: number;
+  cachedContentTokenCount?: number;
+}
+
+const tokenUsage = (usage: UsageMetadata | undefined): TokenUsage => ({
+  inputTokens: usage?.promptTokenCount ?? 0,
+  // Thinking tokens are billed as output.
+  outputTokens: (usage?.candidatesTokenCount ?? 0) + (usage?.thoughtsTokenCount ?? 0),
+  cachedInputTokens: usage?.cachedContentTokenCount ?? 0,
+  reasoningTokens: usage?.thoughtsTokenCount ?? 0,
+});
 
 export class GeminiProvider implements LLMProvider {
   private readonly apiKey = process.env.GEMINI_API_KEY || "";
@@ -88,11 +103,7 @@ export class GeminiProvider implements LLMProvider {
         finishReason?: string;
         content?: { parts?: Array<{ text?: string }> };
       }>;
-      usageMetadata?: {
-        promptTokenCount?: number;
-        candidatesTokenCount?: number;
-        thoughtsTokenCount?: number;
-      };
+      usageMetadata?: UsageMetadata;
     };
     if (data.promptFeedback?.blockReason)
       throw new LLMOutputError(
@@ -114,16 +125,7 @@ export class GeminiProvider implements LLMProvider {
       .map((part) => part.text ?? "")
       .join("");
     if (!text.trim()) throw new LLMOutputError("Gemini", "empty response");
-    const usage = data.usageMetadata;
-    return {
-      text,
-      usage: {
-        inputTokens: usage?.promptTokenCount ?? 0,
-        // Thinking tokens are billed as output.
-        outputTokens:
-          (usage?.candidatesTokenCount ?? 0) + (usage?.thoughtsTokenCount ?? 0),
-      },
-    };
+    return { text, usage: tokenUsage(data.usageMetadata) };
   }
 
   async generateWithTools(
@@ -189,11 +191,7 @@ export class GeminiProvider implements LLMProvider {
           }>;
         };
       }>;
-      usageMetadata?: {
-        promptTokenCount?: number;
-        candidatesTokenCount?: number;
-        thoughtsTokenCount?: number;
-      };
+      usageMetadata?: UsageMetadata;
     };
     if (data.promptFeedback?.blockReason)
       throw new LLMOutputError("Gemini", `prompt blocked (${data.promptFeedback.blockReason})`);
@@ -222,7 +220,6 @@ export class GeminiProvider implements LLMProvider {
       }));
     if (!text.trim() && toolCalls.length === 0)
       throw new LLMOutputError("Gemini", "empty response");
-    const usage = data.usageMetadata;
     return {
       message: {
         role: "assistant",
@@ -233,10 +230,7 @@ export class GeminiProvider implements LLMProvider {
       text,
       toolCalls,
       stopReason: toolCalls.length > 0 ? "tool_use" : "end_turn",
-      usage: {
-        inputTokens: usage?.promptTokenCount ?? 0,
-        outputTokens: (usage?.candidatesTokenCount ?? 0) + (usage?.thoughtsTokenCount ?? 0),
-      },
+      usage: tokenUsage(data.usageMetadata),
     };
   }
 

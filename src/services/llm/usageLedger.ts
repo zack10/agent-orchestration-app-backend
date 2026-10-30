@@ -13,6 +13,8 @@ export interface UsageEntry extends UsageContext {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  cachedInputTokens?: number;
+  reasoningTokens?: number;
 }
 
 /**

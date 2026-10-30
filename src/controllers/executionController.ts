@@ -169,8 +169,8 @@ export const listExecutions = asyncHandler(
 );
 export const getExecution = asyncHandler(
   async (req: Request, res: Response) => {
-    res.json(
-      await prisma.execution.findUniqueOrThrow({
+    const [execution, usage] = await Promise.all([
+      prisma.execution.findUniqueOrThrow({
         where: { id: req.params.id },
         include: {
           plans: {
@@ -183,7 +183,26 @@ export const getExecution = asyncHandler(
           events: { orderBy: { sequence: "asc" } },
         },
       }),
-    );
+      // Every model call the execution made, per model, so its cost can be worked out.
+      prisma.llmUsage.groupBy({
+        by: ["provider", "model"],
+        where: { executionId: req.params.id },
+        _count: { _all: true },
+        _sum: { inputTokens: true, cachedInputTokens: true, outputTokens: true, reasoningTokens: true },
+      }),
+    ]);
+    res.json({
+      ...execution,
+      usage: usage.map((row) => ({
+        provider: row.provider,
+        model: row.model,
+        calls: row._count._all,
+        inputTokens: row._sum.inputTokens ?? 0,
+        cachedInputTokens: row._sum.cachedInputTokens ?? 0,
+        outputTokens: row._sum.outputTokens ?? 0,
+        reasoningTokens: row._sum.reasoningTokens ?? 0,
+      })),
+    });
   },
 );
 export const createPlan = asyncHandler(async (req: Request, res: Response) => {

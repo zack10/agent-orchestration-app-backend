@@ -172,7 +172,7 @@ const runScenario = async (fixtures, scenario, runNumber) => {
     });
 
     const execution = await waitForAnyStatus(result.executionId, RUN_END_STATES, RUN_TIMEOUT_MS);
-    Object.assign(result, eventMetrics(execution.events));
+    Object.assign(result, eventMetrics(execution.events), usageMetrics(execution.usage));
     if (execution.baseSha && execution.baseSha !== baseSha)
       throw new Error(`run used base ${execution.baseSha}, expected the scenario commit ${baseSha}`);
 
@@ -235,10 +235,31 @@ const runScenario = async (fixtures, scenario, runNumber) => {
     if (cardId && env("E2E_KEEP_RESOURCES") !== "true")
       await trello("DELETE", `/cards/${cardId}`).catch((error) => log(`could not delete card: ${error.message}`));
   }
-  if (result.executionId && result.attempts === undefined)
-    Object.assign(result, eventMetrics((await getExecution(result.executionId).catch(() => ({ events: [] }))).events));
+  if (result.executionId && result.attempts === undefined) {
+    const execution = await getExecution(result.executionId).catch(() => ({ events: [] }));
+    Object.assign(result, eventMetrics(execution.events), usageMetrics(execution.usage));
+  }
   log(`${scenario.id} run ${runNumber}: ${OUTCOMES[result.outcome]}${result.note ? ` (${result.note})` : ""}`);
   return result;
+};
+
+// Optional prices per million tokens, "input,cached input,output" (e.g. "0.25,0.025,2"), for the cost column.
+const prices = () => {
+  const values = env("E2E_PRICE_PER_MTOK", "").split(",").map(Number);
+  return values.length === 3 && values.every(Number.isFinite) ? values : undefined;
+};
+
+/** All of an execution's model calls (GET /api/executions/:id usage), with cost when prices are set. */
+const usageMetrics = (usage = []) => {
+  const sum = (key) => usage.reduce((total, row) => total + (row[key] ?? 0), 0);
+  const [input, cached, output] = prices() ?? [];
+  const tokens = { inputTokens: sum("inputTokens"), cachedInputTokens: sum("cachedInputTokens"), outputTokens: sum("outputTokens") };
+  return {
+    ...tokens,
+    costUsd: input === undefined
+      ? undefined
+      : ((tokens.inputTokens - tokens.cachedInputTokens) * input + tokens.cachedInputTokens * cached + tokens.outputTokens * output) / 1e6,
+  };
 };
 
 const percent = (part, whole) => (whole ? `${Math.round((part / whole) * 100)}%` : "n/a");
@@ -261,6 +282,16 @@ const summarize = (results) => {
       : "n/a",
   };
 };
+
+const runTokens = (result) => {
+  const total = (result.inputTokens ?? 0) + (result.outputTokens ?? 0);
+  if (!total) return "";
+  const cached = result.inputTokens ? Math.round((result.cachedInputTokens / result.inputTokens) * 100) : 0;
+  return ` (${Math.round(total / 1000)}k tokens, ${cached}% cached${result.costUsd === undefined ? "" : `, $${result.costUsd.toFixed(3)}`})`;
+};
+
+const totalCost = (results) =>
+  prices() ? results.reduce((sum, result) => sum + (result.costUsd ?? 0), 0) : undefined;
 
 const writeReport = (results, meta) => {
   const summary = summarize(results);
@@ -303,10 +334,11 @@ const writeReport = (results, meta) => {
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ...results.map(
       (result) =>
-        `| ${result.scenario} | ${result.run} | ${OUTCOMES[result.outcome]} | ${result.attempts ?? ""} | ${result.llmCalls ?? ""}${result.loopTokens ? ` (${Math.round(result.loopTokens / 1000)}k tokens)` : ""} | ${Math.round(result.durationMs / 1000)}s | ${cell((result.files ?? []).join(", "))} | ${result.files ? `+${result.linesAdded}/-${result.linesRemoved}` : ""} | ${result.files ? (result.onlyExpectedFiles ? "yes" : "no") : ""} | ${result.files ? (result.testsAdded ? "yes" : "no") : ""} | ${result.files ? (result.testsModified ? "**yes**" : "no") : ""} | ${cell(result.note)} |`,
+        `| ${result.scenario} | ${result.run} | ${OUTCOMES[result.outcome]} | ${result.attempts ?? ""} | ${result.llmCalls ?? ""}${runTokens(result)} | ${Math.round(result.durationMs / 1000)}s | ${cell((result.files ?? []).join(", "))} | ${result.files ? `+${result.linesAdded}/-${result.linesRemoved}` : ""} | ${result.files ? (result.onlyExpectedFiles ? "yes" : "no") : ""} | ${result.files ? (result.testsAdded ? "yes" : "no") : ""} | ${result.files ? (result.testsModified ? "**yes**" : "no") : ""} | ${cell(result.note)} |`,
     ),
     "",
-    "Tokens are the agent loop's input + output tokens (tool_loop mode only; single-shot calls do not report usage).",
+    "Tokens are every model call the execution made (input + output), with the share of input read from the provider's prompt cache" + (prices() ? " and the cost at E2E_PRICE_PER_MTOK." : "; set E2E_PRICE_PER_MTOK to add cost."),
+    ...(totalCost(results) === undefined ? [] : ["", `Total cost: $${totalCost(results).toFixed(2)}.`]),
     "",
   ];
   const failures = results.filter((result) => result.gradeOutput);
