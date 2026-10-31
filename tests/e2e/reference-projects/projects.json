@@ -22,7 +22,9 @@
       ]
     },
     "executionPolicy": {
-      "setupTimeoutSeconds": 2700
+      "setupTimeoutSeconds": 2700,
+      "maxAgentSteps": 60,
+      "maxRunSeconds": 5400
     },
     "environment": {
       "toolchain": {

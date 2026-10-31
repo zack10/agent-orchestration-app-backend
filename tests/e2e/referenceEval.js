@@ -90,7 +90,10 @@ const projectFiles = async (project, instance) => {
     const files = new Map();
     for (const entry of listed.split("\0").filter(Boolean)) {
       const [info, file] = entry.split("\t");
-      files.set(file, { mode: info.split(" ")[0], content: fs.readFileSync(path.join(dir, file)) });
+      // The stored blob, not the checked-out file: git on Windows may have converted its line endings.
+      const [mode, sha] = info.split(" ");
+      const { stdout: content } = await execFileAsync("git", ["-C", dir, "cat-file", "blob", sha], { encoding: "buffer", maxBuffer: 50_000_000 });
+      files.set(file, { mode, content });
     }
     return files;
   } finally {
@@ -337,4 +340,4 @@ if (require.main === module)
     process.exitCode = 1;
   });
 
-module.exports = { gradeDiff, loadInstance };
+module.exports = { gradeDiff, loadInstance, projectFiles };
