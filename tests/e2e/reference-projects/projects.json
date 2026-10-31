@@ -1,0 +1,50 @@
+[
+  {
+    "id": "java/gson-1555",
+    "language": "Java",
+    "source": {
+      "dataset": "ByteDance-Seed/Multi-SWE-bench",
+      "file": "java/google__gson_dataset.jsonl",
+      "number": 1555
+    },
+    "grader": {
+      "image": "mswebench/google_m_gson:pr-1555",
+      "workdir": "/home/gson",
+      "testPatch": "/home/test.patch",
+      "test": [
+        "mvn",
+        "-o",
+        "-B",
+        "clean",
+        "test",
+        "-DfailIfNoTests=false",
+        "-Dmaven.test.failure.ignore=true"
+      ]
+    },
+    "executionPolicy": {
+      "setupTimeoutSeconds": 2700,
+      "maxAgentSteps": 60,
+      "maxRunSeconds": 5400
+    },
+    "environment": {
+      "toolchain": {
+        "env": {
+          "JAVA_HOME": "/usr/lib/jvm/java-11-openjdk-amd64",
+          "DEBIAN_FRONTEND": "noninteractive"
+        },
+        "setup": [
+          "sh",
+          "-c",
+          "apt-get update -qq && apt-get install -y -qq openjdk-11-jdk-headless && mvn -B -q -f gson install -Dmaven.test.failure.ignore=true"
+        ],
+        "checks": {
+          "test": [
+            "sh",
+            "-c",
+            "mvn -o -B -f gson test"
+          ]
+        }
+      }
+    }
+  }
+]

@@ -48,3 +48,9 @@ opencode.json
 
 # Local experiments (kept on disk, not tracked)
 scratch/
+
+# Graphify knowledge graph (generated locally)
+graphify-out/
+
+# Codex project config (personal Graphify MCP setup)
+.codex/

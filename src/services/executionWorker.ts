@@ -11,10 +11,10 @@ import {
 } from "../integrations/githubApp";
 import { commentOnWorkItem } from "./ingestionService";
 import { NonRetryableError, describeError } from "../utils/safeError";
-import { runExecutionGraph } from "./agentGraph/executionGraph";
+import { discardExecutionRun, runExecutionGraph } from "./agentGraph/executionGraph";
 import { hashSnapshot, submitPlan } from "./executionService";
 import rabbitMQService from "./rabbitMQService";
-import { publishApprovedDiff } from "./workspaceService";
+import { describeFailingBefore, describeReviewObjections, describeVerification, publishApprovedDiff } from "./workspaceService";
 
 const TERMINAL: ExecutionStatus[] = ["COMPLETED", "BLOCKED", "FAILED", "CANCELED"];
 const RUN_STATES: ExecutionStatus[] = ["RUNNING", "VERIFYING"];
@@ -77,6 +77,10 @@ export const markExecutionFailed = async (
     },
   });
   if (result.count === 0) return;
+  // No retry is left to resume the run: drop its saved steps and workspace.
+  await discardExecutionRun(executionId).catch((cleanupError) =>
+    console.error(`Cleanup failed for ${executionId}: ${describeError(cleanupError)}`),
+  );
   await appendEvent(executionId, "EXECUTION_FAILED", { stage, reason });
   await notifyTracker(
     executionId,
@@ -199,6 +203,17 @@ const run = async (executionId: string) => {
       `Execution ${executionId} is blocked after verification failures. Review the execution evidence.`,
     );
   }
+  if (execution?.status === "AWAITING_PUBLISH_APPROVAL") {
+    // The approver decides on a change the reviewer objected to, or one whose checks already failed, so tell them where they look.
+    const diff = await prisma.artifact.findFirst({
+      where: { executionId, type: "DIFF" },
+      orderBy: { createdAt: "desc" },
+      select: { metadata: true },
+    });
+    const warnings = [describeReviewObjections(diff?.metadata), describeFailingBefore(diff?.metadata)].filter(Boolean);
+    if (warnings.length)
+      await notifyTracker(executionId, `Execution ${executionId} is awaiting publish approval.\n\n${warnings.join("\n\n")}`);
+  }
 };
 
 const publish = async (executionId: string) => {
@@ -280,7 +295,7 @@ const publish = async (executionId: string) => {
         ...pullRequestInput,
         title: execution.workItem.title,
         base: repository.defaultBranch,
-        body: `Automated draft for ${execution.workItem.sourceUrl ?? execution.workItem.id}\n\nExecution: ${execution.id}\n\nVerification passed. Human review is required.`,
+        body: `Automated draft for ${execution.workItem.sourceUrl ?? execution.workItem.id}\n\nExecution: ${execution.id}\n\n${describeVerification(diffArtifact.metadata)}\n\nHuman review is required.`,
       });
     }
     await prisma.artifact.create({
