@@ -71,7 +71,12 @@ export const approveEnvironment = asyncHandler(
     const current = parseVerificationConfig(repository.verificationConfig);
     const verificationConfig = parseVerificationConfig({
       ...current,
-      toolchain: { ...current.toolchain, ...proposal.toolchain },
+      // Proposed variables add to configured ones, as they did when the proposal was proved.
+      toolchain: {
+        ...current.toolchain,
+        ...proposal.toolchain,
+        ...(proposal.toolchain.env ? { env: { ...current.toolchain?.env, ...proposal.toolchain.env } } : {}),
+      },
     });
     // Only if nothing changed the repository since it was read.
     const { count } = await prisma.repository.updateMany({

@@ -14,7 +14,7 @@ export const EXECUTION_PROMPTS = {
   analyze: "analyze.v2",
   review: "review.v6",
   reviewer: "reviewer.v3",
-  discover: "discover.v2",
+  discover: "discover.v3",
   fileFormat: "file-format.v1",
 } as const;
 

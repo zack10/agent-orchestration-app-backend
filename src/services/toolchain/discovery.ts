@@ -17,6 +17,8 @@ export interface EnvironmentProposal {
   image?: string;
   setup?: string[] | null;
   checks: Record<string, string[]>;
+  /** Variables setup and every check run with: an `export` in setup is gone by the time a check runs. */
+  env?: Record<string, string>;
   language?: string;
 }
 
@@ -56,6 +58,7 @@ export interface DiscoveryResult<P extends ProofResult> {
 export interface FixedEnvironment {
   image?: string;
   setup?: string[] | null;
+  env?: Record<string, string>;
 }
 
 export const hashProposal = (proposal: EnvironmentProposal) =>
@@ -67,6 +70,7 @@ export const applyProposal = (base: Toolchain, proposal: EnvironmentProposal): T
   ...(proposal.language ? { language: proposal.language } : {}),
   ...(proposal.image ? { image: proposal.image } : {}),
   ...(proposal.setup !== undefined ? { setup: proposal.setup } : {}),
+  ...(proposal.env ? { env: { ...base.env, ...proposal.env } } : {}),
   checks: proposal.checks,
 });
 
@@ -77,6 +81,7 @@ const replySchema = z.object({
   image: z.string().optional(),
   setup: z.string().nullable().optional(),
   checks: z.record(z.string(), z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   language: z.string().max(100).optional(),
   rationale: z.string().optional(),
 });
@@ -105,6 +110,7 @@ export const parseDiscoveryReply = (raw: string, fixed: FixedEnvironment): Reply
     ...(fixed.image ? {} : { image: reply.image }),
     ...(fixed.setup !== undefined ? {} : { setup: reply.setup?.trim() ? shell(reply.setup.trim()) : null }),
     checks: Object.fromEntries(Object.entries(reply.checks ?? {}).map(([name, command]) => [name, shell(command)])),
+    ...(reply.env && Object.keys(reply.env).length ? { env: reply.env } : {}),
     ...(reply.language ? { language: reply.language } : {}),
   };
   try {
@@ -120,6 +126,7 @@ const describeProposal = (proposal: EnvironmentProposal, fixed: FixedEnvironment
   return [
     `Image: ${proposal.image ?? fixed.image}`,
     `Setup: ${setup ? commandText(setup) : "none"}`,
+    ...Object.entries(proposal.env ?? {}).map(([name, value]) => `Env: ${name}=${value}`),
     `Checks:${Object.keys(proposal.checks).length ? "" : " none"}`,
     ...Object.entries(proposal.checks).map(([name, command]) => `- ${name}: ${commandText(command)}`),
   ].join("\n");

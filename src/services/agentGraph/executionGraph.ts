@@ -303,6 +303,7 @@ const describeFixed = (fixed: FixedEnvironment) =>
   [
     ...(fixed.image ? [`Image: ${fixed.image}`] : []),
     ...(fixed.setup ? [`Setup: ${fixed.setup.join(" ")}`] : []),
+    ...Object.entries(fixed.env ?? {}).map(([name, value]) => `Env: ${name}=${value}`),
   ].join("\n") || "Nothing.";
 
 /**
@@ -334,6 +335,7 @@ const prepareEnvironment = async (
   const fixed: FixedEnvironment = {
     image: resolution.toolchain.image,
     ...(resolution.toolchain.setup !== null ? { setup: resolution.toolchain.setup } : {}),
+    ...(Object.keys(resolution.toolchain.env).length ? { env: resolution.toolchain.env } : {}),
   };
   const stored = repository.environmentProposal as unknown as StoredProposal | null;
   const files = discoveryFiles(fsRepoFiles(workspacePath(executionId)), await trackedFiles(executionId));

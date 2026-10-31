@@ -93,6 +93,22 @@ test("a failed setup goes back to the model with its output, and the revision is
   assert.deepEqual(result.attempts.map((a) => a.outcome), ["setup_failed", "works"]);
 });
 
+test("proposed variables reach setup and every check, on top of the project's own", async () => {
+  const parsed = parseDiscoveryReply(reply({ ...PROPOSAL, env: { RUNTIME_HOME: "/opt/runtime-2" } }), {});
+  assert.deepEqual(parsed.proposal.env, { RUNTIME_HOME: "/opt/runtime-2" });
+  assert.equal(parseDiscoveryReply(reply({ ...PROPOSAL, env: {} }), {}).proposal.env, undefined);
+  assert.ok(parseDiscoveryReply(reply({ ...PROPOSAL, env: { "BAD-NAME": "x" } }), {}).error, "names follow the configuration rules");
+
+  const { toolchain } = resolveToolchain(() => undefined, { toolchain: { env: { CI: "true" } } });
+  assert.deepEqual(applyProposal(toolchain, parsed.proposal).env, { CI: "true", RUNTIME_HOME: "/opt/runtime-2" });
+
+  const model = scriptedModel([reply(PROPOSAL), reply({ ...PROPOSAL, env: { RUNTIME_HOME: "/opt/runtime-2" } })]);
+  const proofs = scriptedProofs([{ setupError: "runtime 1 is too old", baseline: [] }, passing]);
+  const result = await discoverEnvironment({ fixed: {}, maxAttempts: 3 }, { ...model, ...proofs });
+  assert.deepEqual(result.proposal.env, { RUNTIME_HOME: "/opt/runtime-2" }, "a changed env is a new proposal");
+  assert.equal(proofs.proved.length, 2);
+});
+
 test("a proposal that already failed is not proved again", async () => {
   const fixed = { image: "default/universal:2" };
   const revised = { ...PROPOSAL, setup: "install runtime 2 && make deps" };
