@@ -163,6 +163,17 @@ const gradeDiff = async (project, instance, diff) => {
   }
 };
 
+// The shared sandbox repository's own policy, put back after the projects ran.
+let originalPolicy;
+const ORIGINAL_POLICY = (fixtures) => (originalPolicy ??= fixtures.repository.executionPolicy ?? {});
+
+/** Sets the sandbox repository's execution policy (limits such as the setup timeout), if it differs. */
+const usePolicy = async (fixtures, executionPolicy) => {
+  if (JSON.stringify(fixtures.repository.executionPolicy) === JSON.stringify(executionPolicy)) return;
+  const { data } = await api("PATCH", `/api/repositories/${fixtures.repository.id}`, { body: { executionPolicy }, expectStatus: 200 });
+  fixtures.repository = data;
+};
+
 const runProject = async (fixtures, project) => {
   const id = runId();
   const started = Date.now();
@@ -177,6 +188,7 @@ const runProject = async (fixtures, project) => {
     const files = await projectFiles(project, instance);
     // No environment: the agent has to find out how the project is built and tested.
     await useEnvironment(fixtures, {});
+    await usePolicy(fixtures, { ...ORIGINAL_POLICY(fixtures), ...project.executionPolicy });
     log(`${project.id}: pushing ${files.size} files at ${instance.base.sha.slice(0, 8)}`);
     const baseSha = await pushProject(files, `reference: ${project.id} at ${instance.base.sha} (${id})`);
     cardId = await createCard(`[${id}] ${issue.title}`, issue.body ?? "");
@@ -312,6 +324,7 @@ const main = async () => {
     const suite = loadSuites().find((candidate) => candidate.name === DEFAULT_SUITE);
     await setDefaultBranch(cleanFiles(suite), "reference: restore clean project").catch((error) => log(`could not restore main: ${error.message}`));
     await useEnvironment(fixtures, suiteEnvironment(suite)).catch((error) => log(`could not restore the environment: ${error.message}`));
+    await usePolicy(fixtures, ORIGINAL_POLICY(fixtures)).catch((error) => log(`could not restore the policy: ${error.message}`));
   }
   const file = writeReport(results, { date: new Date().toLocaleDateString("sv"), commit: commit.trim() });
   log(`report: ${path.relative(process.cwd(), file)}`);

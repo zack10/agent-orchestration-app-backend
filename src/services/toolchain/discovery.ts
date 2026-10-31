@@ -197,7 +197,9 @@ export const discoverEnvironment = async <P extends ProofResult>(
     const proof = await deps.prove(proposal);
     const tried = `${describeProposal(proposal, input.fixed)}\n\n${describeProof(proof)}`;
     if (proof.setupError) {
-      attempts.push({ proposal, outcome: "setup_failed", detail: proof.setupError.slice(-1000) });
+      // The first line says how it failed (exit code, killed by timeout); the end, where.
+      const [status] = proof.setupError.split("\n", 1);
+      attempts.push({ proposal, outcome: "setup_failed", detail: `${status}\n...\n${proof.setupError.slice(-1000)}` });
       lastAttempt = tried;
       proposal = null;
       continue;

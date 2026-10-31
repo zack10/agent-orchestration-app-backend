@@ -322,8 +322,10 @@ const prepareEnvironment = async (
   ask: (prompt: RenderedPrompt) => Promise<string>,
 ): Promise<{ toolchain: Toolchain; setup: SetupResult; environmentProposal?: ProposedEnvironment }> => {
   const checksFor = (toolchain: Toolchain) => selectChecks(toolchain, repository.verificationConfig).run;
+  const timeout = (repository.executionPolicy as RepositoryPolicy | null)?.setupTimeoutSeconds;
+  const setupOptions = { cacheFor: repository.id, ...(timeout ? { setupTimeoutMs: timeout * 1000 } : {}) };
   const setUp = async (toolchain: Toolchain) => {
-    const setup = await setupWorkspace(executionId, toolchain, checksFor(toolchain), { cacheFor: repository.id });
+    const setup = await setupWorkspace(executionId, toolchain, checksFor(toolchain), setupOptions);
     return { toolchain: { ...toolchain, image: setup.image }, setup };
   };
   if (Object.keys(resolution.toolchain.checks).length || !config.executionDiscoveryMaxAttempts)
@@ -349,7 +351,7 @@ const prepareEnvironment = async (
         if (proofs++) await restoreClone(executionId);
         const toolchain = applyProposal(resolution.toolchain, proposal);
         try {
-          return await setupWorkspace(executionId, toolchain, checksFor(toolchain), { cacheFor: repository.id });
+          return await setupWorkspace(executionId, toolchain, checksFor(toolchain), setupOptions);
         } catch (error) {
           if (!(error instanceof SetupFailedError)) throw error;
           return { setupError: error.message, image: toolchain.image, baseline: [], setupOutputs: [], cache: "none" as const };

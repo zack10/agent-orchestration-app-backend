@@ -11,7 +11,18 @@
       "image": "mswebench/google_m_gson:pr-1555",
       "workdir": "/home/gson",
       "testPatch": "/home/test.patch",
-      "test": ["mvn", "-o", "-B", "clean", "test", "-DfailIfNoTests=false", "-Dmaven.test.failure.ignore=true"]
+      "test": [
+        "mvn",
+        "-o",
+        "-B",
+        "clean",
+        "test",
+        "-DfailIfNoTests=false",
+        "-Dmaven.test.failure.ignore=true"
+      ]
+    },
+    "executionPolicy": {
+      "setupTimeoutSeconds": 2700
     }
   }
 ]

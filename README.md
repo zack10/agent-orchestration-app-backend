@@ -242,6 +242,7 @@ flowchart TD
   - The tools enforce the rules, not only the prompt: protected paths can't be edited, existing test files can't be changed (new ones can), and code can change only after a new test has failed or the agent has said with `skip_reproduction` why no test can show the change.
   - Old tool results are shortened in batches, so the start of the conversation stays the same and the provider's prompt cache keeps working.
   - Check and command output is capped at 10,000 characters with the start and the end kept, and `read_file` returns up to 400 lines per call. A repository can set `executionPolicy.maxToolOutputChars` (1,000-20,000) and `executionPolicy.maxReadLines` (50-400).
+  - Setup may run for 15 minutes; a repository can set `executionPolicy.setupTimeoutSeconds` (60-7,200).
 
 In both modes, policy, verification and review run afterwards, independently of what the agent reports.
 

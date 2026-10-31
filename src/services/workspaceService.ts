@@ -263,7 +263,7 @@ export const setupWorkspace = async (
   id: string,
   toolchain: Toolchain,
   checks: Array<{ name: string; command: string[] }>,
-  options: { cacheFor?: string } = {},
+  options: { cacheFor?: string; setupTimeoutMs?: number } = {},
 ) => {
   const baseline: BaselineResult[] = [];
   let setupOutputs: string[] = [];
@@ -283,7 +283,7 @@ export const setupWorkspace = async (
   // Same limits as every container, but long-lived so it can be committed.
   args.splice(args.indexOf("--rm"), 1, "-d", "--name", setupContainer(id));
   const run = (command: string[]) =>
-    execDocker(["exec", setupContainer(id), ...command], undefined, SETUP_TIMEOUT_MS);
+    execDocker(["exec", setupContainer(id), ...command], undefined, options.setupTimeoutMs ?? SETUP_TIMEOUT_MS);
   try {
     try {
       await execDocker(args);

@@ -93,6 +93,14 @@ test("a failed setup goes back to the model with its output, and the revision is
   assert.deepEqual(result.attempts.map((a) => a.outcome), ["setup_failed", "works"]);
 });
 
+test("a long setup failure keeps how it failed in the recorded attempt, not only the end of its output", async () => {
+  const output = `docker run failed (killed by SIGTERM)\nstderr:\n(empty)\nstdout:\n${"Compiling...\n".repeat(500)}`;
+  const model = scriptedModel([reply(PROPOSAL)]);
+  const result = await discoverEnvironment({ fixed: {}, maxAttempts: 1 }, { ...model, ...scriptedProofs([{ setupError: output, baseline: [] }]) });
+  assert.match(result.attempts[0].detail, /^docker run failed \(killed by SIGTERM\)\n\.\.\.\n/);
+  assert.ok(result.attempts[0].detail.endsWith("Compiling...\n"));
+});
+
 test("proposed variables reach setup and every check, on top of the project's own", async () => {
   const parsed = parseDiscoveryReply(reply({ ...PROPOSAL, env: { RUNTIME_HOME: "/opt/runtime-2" } }), {});
   assert.deepEqual(parsed.proposal.env, { RUNTIME_HOME: "/opt/runtime-2" });
