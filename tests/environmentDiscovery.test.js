@@ -93,6 +93,19 @@ test("a failed setup goes back to the model with its output, and the revision is
   assert.deepEqual(result.attempts.map((a) => a.outcome), ["setup_failed", "works"]);
 });
 
+test("a proposal that already failed is not proved again", async () => {
+  const fixed = { image: "default/universal:2" };
+  const revised = { ...PROPOSAL, setup: "install runtime 2 && make deps" };
+  const model = scriptedModel([reply(PROPOSAL), reply(PROPOSAL), reply(revised)]);
+  const proofs = scriptedProofs([{ setupError: "make: deps: requires runtime >= 2", baseline: [] }, passing]);
+  const result = await discoverEnvironment({ fixed, maxAttempts: 3 }, { ...model, ...proofs });
+  assert.equal(result.proven, true);
+  assert.equal(proofs.proved.length, 2);
+  assert.deepEqual(result.attempts.map((a) => a.outcome), ["setup_failed", "invalid", "works"]);
+  assert.match(model.shown[2], /requires runtime >= 2\n\nYou then proposed exactly this environment again/);
+  assert.equal(result.proposal.image, undefined, "the given image is never proposed");
+});
+
 test("a failing check is the project's own failure when the model says the environment works", async () => {
   const model = scriptedModel([reply(PROPOSAL), '{ "works": true }']);
   const failingTest = { baseline: [{ check: "test", passed: false, output: "1 failed: expected 3, got 4" }] };

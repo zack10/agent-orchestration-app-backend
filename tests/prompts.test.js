@@ -296,6 +296,6 @@ test("the prompts in use name no language, package manager or file type", () => 
   }
   assert.deepEqual(
     rendered.map((prompt) => prompt.version),
-    ["plan.v3", "implement.v2", "analyze.v2", "review.v6", "agent.v6", "discover.v1", "triage.v1", "reviewer.v3"],
+    ["plan.v3", "implement.v2", "analyze.v2", "review.v6", "agent.v6", "discover.v2", "triage.v1", "reviewer.v3"],
   );
 });

@@ -156,6 +156,8 @@ export const discoverEnvironment = async <P extends ProofResult>(
   let rationale = input.stored ? (input.storedRationale ?? "Proposed by an earlier run.") : "";
   let lastAttempt = "None.";
   const fromStored = Boolean(input.stored);
+  // Proposals already proved and found wanting: proving one again would fail the same way.
+  const failed = new Set<string>();
 
   const ask = async () => {
     const reply = parseDiscoveryReply(await deps.ask(lastAttempt), input.fixed);
@@ -178,6 +180,13 @@ export const discoverEnvironment = async <P extends ProofResult>(
       }
       ({ proposal, rationale } = reply);
     }
+    if (failed.has(hashProposal(proposal))) {
+      attempts.push({ proposal, outcome: "invalid", detail: "the same proposal as one that already failed" });
+      lastAttempt = `${lastAttempt}\n\nYou then proposed exactly this environment again. It already failed as shown above: propose a different one.`;
+      proposal = null;
+      continue;
+    }
+    failed.add(hashProposal(proposal));
     const proof = await deps.prove(proposal);
     const tried = `${describeProposal(proposal, input.fixed)}\n\n${describeProof(proof)}`;
     if (proof.setupError) {

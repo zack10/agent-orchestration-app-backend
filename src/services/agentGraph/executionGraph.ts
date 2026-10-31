@@ -328,8 +328,11 @@ const prepareEnvironment = async (
   if (Object.keys(resolution.toolchain.checks).length || !config.executionDiscoveryMaxAttempts)
     return setUp(resolution.toolchain);
 
+  // The image is never the model's choice: the project's, else the default
+  // image (which has the common runtimes), and setup installs what it lacks.
+  // A model naming images invents tags that do not exist.
   const fixed: FixedEnvironment = {
-    ...(resolution.source !== "default" ? { image: resolution.toolchain.image } : {}),
+    image: resolution.toolchain.image,
     ...(resolution.toolchain.setup !== null ? { setup: resolution.toolchain.setup } : {}),
   };
   const stored = repository.environmentProposal as unknown as StoredProposal | null;
