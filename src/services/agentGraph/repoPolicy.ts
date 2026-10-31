@@ -6,6 +6,10 @@ export interface RepositoryPolicy {
   maxReadLines?: number;
   /** How long setup may run, in seconds; default 900. */
   setupTimeoutSeconds?: number;
+  /** Model calls per agent attempt; default AGENT_MAX_STEPS (30). */
+  maxAgentSteps?: number;
+  /** How long a run may take, in seconds; default EXECUTION_MAX_DURATION_SECONDS (1800). */
+  maxRunSeconds?: number;
 }
 
 // Used only when no toolchain is known; normally the toolchain's

@@ -440,10 +440,12 @@ const loadExecutionContext = async (
   );
   const agentMode = config.executionAgentMode;
   const budget = (execution.budget ?? {}) as ExecutionBudget;
-  const maxSteps = positive(budget.maxSteps, config.agentMaxSteps);
+  // The repository's limits win over the defaults each execution is created with.
+  const policy = execution.repository.executionPolicy as RepositoryPolicy | null;
+  const maxSteps = positive(budget.maxSteps ?? policy?.maxAgentSteps, config.agentMaxSteps);
   const maxTokens = positive(budget.maxTokens, 200_000);
   const deadline =
-    Date.now() + positive(budget.maxDurationSeconds, 1800) * 1000;
+    Date.now() + positive(policy?.maxRunSeconds ?? budget.maxDurationSeconds, 1800) * 1000;
   const attemptShare = Math.min(1, positive(budget.attemptShare, DEFAULT_ATTEMPT_SHARE));
   const resolved = llm.resolveModel(agent);
   const agentConfig = agent.config as

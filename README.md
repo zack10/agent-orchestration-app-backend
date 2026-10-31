@@ -243,6 +243,7 @@ flowchart TD
   - Old tool results are shortened in batches, so the start of the conversation stays the same and the provider's prompt cache keeps working.
   - Check and command output is capped at 10,000 characters with the start and the end kept, and `read_file` returns up to 400 lines per call. A repository can set `executionPolicy.maxToolOutputChars` (1,000-20,000) and `executionPolicy.maxReadLines` (50-400).
   - Setup may run for 15 minutes; a repository can set `executionPolicy.setupTimeoutSeconds` (60-7,200).
+  - The agent gets 30 model calls per attempt and a run 30 minutes; a repository can set `executionPolicy.maxAgentSteps` (5-200) and `executionPolicy.maxRunSeconds` (300-14,400).
 
 In both modes, policy, verification and review run afterwards, independently of what the agent reports.
 
