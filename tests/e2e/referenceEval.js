@@ -103,18 +103,17 @@ const projectFiles = async (project, instance) => {
 const pushProject = async (files, message) => {
   const branch = env("E2E_GITHUB_DEFAULT_BRANCH", "main");
   const ref = await github("GET", `${repoPath()}/git/ref/heads/${branch}`);
-  const entries = [...files];
   const tree = [];
-  // A few blobs at a time, to stay well inside GitHub's rate limits.
-  for (let index = 0; index < entries.length; index += 8)
-    tree.push(
-      ...(await Promise.all(
-        entries.slice(index, index + 8).map(async ([file, { mode, content }]) => {
-          const blob = await github("POST", `${repoPath()}/git/blobs`, { content: content.toString("base64"), encoding: "base64" });
-          return { path: file, mode, type: "blob", sha: blob.sha };
-        }),
-      )),
-    );
+  // Text goes inline in the one tree request: a request per file trips
+  // GitHub's secondary rate limit. Only binary files need a blob each.
+  for (const [file, { mode, content }] of files) {
+    const text = content.toString("utf8");
+    if (!text.includes("\0") && Buffer.from(text, "utf8").equals(content)) tree.push({ path: file, mode, type: "blob", content: text });
+    else {
+      const blob = await github("POST", `${repoPath()}/git/blobs`, { content: content.toString("base64"), encoding: "base64" });
+      tree.push({ path: file, mode, type: "blob", sha: blob.sha });
+    }
+  }
   const created = await github("POST", `${repoPath()}/git/trees`, { tree });
   const commit = await github("POST", `${repoPath()}/git/commits`, { message, tree: created.sha, parents: [ref.object.sha] });
   await github("PATCH", `${repoPath()}/git/refs/heads/${branch}`, { sha: commit.sha });
