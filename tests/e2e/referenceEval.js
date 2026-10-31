@@ -10,6 +10,10 @@
 // test log matched with the project's grader.resultPattern).
 // Writes docs/testing/reference-<date>.md and restores main.
 //
+// --publish (one project only): approve publishing instead, so the run
+// opens a draft PR on the sandbox repo, and leave main at the project so
+// the PR's diff stays readable; the next run without it restores main.
+//
 // Needs what the coding eval needs (see codingEval.js). It REWRITES the
 // sandbox repo's main.
 const { execFile } = require("node:child_process");
@@ -51,6 +55,7 @@ const PLAN_TIMEOUT_MS = envInt("E2E_PLAN_TIMEOUT_MS", 120_000);
 // Real builds are slower than the benchmark's: discovery, setup and checks.
 const RUN_TIMEOUT_MS = envInt("E2E_REFERENCE_RUN_TIMEOUT_MS", 2_700_000);
 const RUN_END_STATES = ["AWAITING_PUBLISH_APPROVAL", "BLOCKED", "FAILED", "CANCELED"];
+const PUBLISH_TIMEOUT_MS = envInt("E2E_PUBLISH_TIMEOUT_MS", 300_000);
 const DEFAULT_SUITE = "node";
 
 const docker = (args, options = {}) =>
@@ -193,7 +198,7 @@ const usePolicy = async (fixtures, executionPolicy) => {
   fixtures.repository = data;
 };
 
-const runProject = async (fixtures, project) => {
+const runProject = async (fixtures, project, publish) => {
   const id = runId();
   const started = Date.now();
   const result = { project: project.id, language: project.language, outcome: "infra_failure", note: "" };
@@ -238,9 +243,15 @@ const runProject = async (fixtures, project) => {
       if (crypto.createHash("sha256").update(JSON.stringify(diff)).digest("hex") !== artifact.sha256)
         throw new Error("diff artifact does not match its recorded sha256");
       await api("POST", `/api/executions/${result.executionId}/approvals/publish`, {
-        body: { approved: false, snapshotHash: pendingApproval(execution, "PUBLISH").snapshotHash, comment: "reference eval" },
+        body: { approved: publish, snapshotHash: pendingApproval(execution, "PUBLISH").snapshotHash, comment: "reference eval" },
         expectStatus: 200,
       });
+      if (publish) {
+        const published = await waitForStatus(result.executionId, "COMPLETED", PUBLISH_TIMEOUT_MS);
+        result.pullRequest = published.artifacts.find((candidate) => candidate.type === "PULL_REQUEST")?.metadata?.html_url;
+        if (!result.pullRequest) throw new Error("published, but no PULL_REQUEST artifact");
+        log(`${project.id}: draft PR ${result.pullRequest}`);
+      }
       const stats = diffStats(diff);
       result.files = stats.files;
       result.linesAdded = stats.added;
@@ -290,7 +301,7 @@ const writeReport = (results, meta) => {
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ...results.map((result) => {
       const tokens = (result.inputTokens ?? 0) + (result.outputTokens ?? 0);
-      return `| ${result.project} | ${result.issue ?? ""} | ${OUTCOMES[result.outcome]} | ${result.attempts ?? ""} | ${result.llmCalls ?? ""} | ${tokens ? `${Math.round(tokens / 1000)}k` : ""} | ${result.costUsd === undefined ? "" : `$${result.costUsd.toFixed(3)}`} | ${Math.round(result.durationMs / 1000)}s | ${cell((result.files ?? []).join(", "))} | ${cell(result.note)} |`;
+      return `| ${result.project} | ${result.issue ?? ""} | ${OUTCOMES[result.outcome]} | ${result.attempts ?? ""} | ${result.llmCalls ?? ""} | ${tokens ? `${Math.round(tokens / 1000)}k` : ""} | ${result.costUsd === undefined ? "" : `$${result.costUsd.toFixed(3)}`} | ${Math.round(result.durationMs / 1000)}s | ${cell((result.files ?? []).join(", "))} | ${cell([result.pullRequest && `draft PR ${result.pullRequest}`, result.note].filter(Boolean).join("; "))} |`;
     }),
     "",
     "## Environment per project",
@@ -315,11 +326,14 @@ const writeReport = (results, meta) => {
 const main = async () => {
   const wanted = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
   const check = process.argv.includes("--check");
+  const publish = process.argv.includes("--publish");
   const missing = skipUnless([...PIPELINE_ENV, "E2E_GITHUB_TOKEN"]);
   if (missing) throw new Error(missing);
   let projects = JSON.parse(fs.readFileSync(PROJECTS_FILE, "utf8"));
   if (wanted.length) projects = projects.filter((project) => wanted.some((id) => project.id.startsWith(id)));
   if (!projects.length) throw new Error(`No reference project matches ${wanted.join(", ")}`);
+  // Each project replaces main, which would turn an earlier project's PR into a diff against another project.
+  if (publish && projects.length > 1) throw new Error("--publish runs one project; name it (e.g. go/go-zero-1969)");
 
   await assertServerHealthy();
   const fixtures = await ensureFixtures();
@@ -339,10 +353,11 @@ const main = async () => {
   log(`${projects.length} project(s) with ${env("E2E_LLM_PROVIDER")}/${env("E2E_LLM_MODEL")}${env("E2E_PRICE_PER_MTOK") ? "" : " (set E2E_PRICE_PER_MTOK for cost)"}`);
   const results = [];
   try {
-    for (const project of projects) results.push(await runProject(fixtures, project));
+    for (const project of projects) results.push(await runProject(fixtures, project, publish));
   } finally {
     const suite = loadSuites().find((candidate) => candidate.name === DEFAULT_SUITE);
-    await setDefaultBranch(cleanFiles(suite), "reference: restore clean project").catch((error) => log(`could not restore main: ${error.message}`));
+    if (publish) log("--publish: main left at the project so the draft PR stays readable");
+    else await setDefaultBranch(cleanFiles(suite), "reference: restore clean project").catch((error) => log(`could not restore main: ${error.message}`));
     await useEnvironment(fixtures, suiteEnvironment(suite)).catch((error) => log(`could not restore the environment: ${error.message}`));
     await usePolicy(fixtures, ORIGINAL_POLICY(fixtures)).catch((error) => log(`could not restore the policy: ${error.message}`));
   }
