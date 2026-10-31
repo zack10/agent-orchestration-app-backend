@@ -186,8 +186,9 @@ const runProject = async (fixtures, project) => {
     log(`${project.id}: ${result.issue} "${issue.title}"`);
     await docker(["pull", "-q", project.grader.image]);
     const files = await projectFiles(project, instance);
-    // No environment: the agent has to find out how the project is built and tested.
-    await useEnvironment(fixtures, {});
+    // The environment a person approved once, if the project has one; else none,
+    // and discovery has to find out how the project is built and tested.
+    await useEnvironment(fixtures, project.environment ?? {});
     await usePolicy(fixtures, { ...ORIGINAL_POLICY(fixtures), ...project.executionPolicy });
     log(`${project.id}: pushing ${files.size} files at ${instance.base.sha.slice(0, 8)}`);
     const baseSha = await pushProject(files, `reference: ${project.id} at ${instance.base.sha} (${id})`);
