@@ -6,7 +6,8 @@
 // the agent works, with no environment configured (discovery finds it) ->
 // reject publishing -> grade the diff the way the benchmark does: in its
 // own image, without network, with the instance's test patch added, every
-// FAIL_TO_PASS and PASS_TO_PASS test class must pass (JUnit XML reports).
+// FAIL_TO_PASS and PASS_TO_PASS test must pass (JUnit XML reports, or the
+// test log matched with the project's grader.resultPattern).
 // Writes docs/testing/reference-<date>.md and restores main.
 //
 // Needs what the coding eval needs (see codingEval.js). It REWRITES the
@@ -110,6 +111,8 @@ const pushProject = async (files, message) => {
   // Text goes inline in the one tree request: a request per file trips
   // GitHub's secondary rate limit. Only binary files need a blob each.
   for (const [file, { mode, content }] of files) {
+    // Pushing workflows needs the token's Workflows permission, and they would run the project's CI in the sandbox.
+    if (file.startsWith(".github/workflows/")) continue;
     const text = content.toString("utf8");
     if (!text.includes("\0") && Buffer.from(text, "utf8").equals(content)) tree.push({ path: file, mode, type: "blob", content: text });
     else {
@@ -127,13 +130,14 @@ const pushProject = async (files, message) => {
  * Grades a diff as the benchmark does: in its image, without network, the
  * diff and then the instance's test patch applied, the tests run, and every
  * FAIL_TO_PASS and PASS_TO_PASS test class must pass. Results come from the
- * JUnit XML reports the test run leaves behind.
+ * JUnit XML reports the test run leaves behind, or from the test log when
+ * the project sets grader.resultPattern (a regex with name and status groups).
  */
 const gradeDiff = async (project, instance, diff) => {
   const patchDir = fs.mkdtempSync(path.join(os.tmpdir(), "reference-patch-"));
   try {
     fs.writeFileSync(path.join(patchDir, "agent.diff"), diff);
-    const { workdir, testPatch, test } = project.grader;
+    const { workdir, testPatch, test, resultPattern } = project.grader;
     const script = [
       `cd ${workdir}`,
       `git checkout -q --force ${instance.base.sha}`,
@@ -141,8 +145,9 @@ const gradeDiff = async (project, instance, diff) => {
       `git apply --whitespace=nowarn ${testPatch} || { echo GRADE_TEST_PATCH_FAILED; exit 0; }`,
       `${test.map((part) => `'${part}'`).join(" ")} > /tmp/test.log 2>&1; echo GRADE_EXIT=$?`,
       // One line per test suite report: its opening tag carries the name and the counts.
-      `grep -rl --include='*.xml' '<testsuite' . | while read -r f; do grep -o '<testsuite [^>]*>' "$f" | head -1; done`,
-      "tail -c 3000 /tmp/test.log",
+      resultPattern
+        ? "echo GRADE_LOG_START; cat /tmp/test.log"
+        : `grep -rl --include='*.xml' '<testsuite' . | while read -r f; do grep -o '<testsuite [^>]*>' "$f" | head -1; done; tail -c 3000 /tmp/test.log`,
     ].join("\n");
     const { stdout } = await docker(
       ["run", "--rm", "--network", "none", "--cpus", "2", "--memory", "3g", "-v", `${patchDir}:/patch:ro`, project.grader.image, "bash", "-c", script],
@@ -151,15 +156,26 @@ const gradeDiff = async (project, instance, diff) => {
     if (stdout.includes("GRADE_APPLY_FAILED")) return { applied: false, output: stdout.slice(-1500) };
     if (stdout.includes("GRADE_TEST_PATCH_FAILED")) return { applied: false, output: `the hidden test patch no longer applies\n${stdout.slice(-1500)}` };
     const suites = new Map();
+    if (resultPattern) {
+      // Test names are not unique across packages: one failure anywhere fails the name.
+      const pattern = new RegExp(resultPattern);
+      for (const line of stdout.slice(stdout.indexOf("GRADE_LOG_START")).split("\n")) {
+        const groups = pattern.exec(line)?.groups;
+        if (groups && suites.get(groups.name) !== "FAIL") suites.set(groups.name, groups.status === "PASS" ? "PASS" : "FAIL");
+      }
+    }
     for (const tag of stdout.match(/<testsuite [^>]*>/g) ?? []) {
       const attribute = (name) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1];
       const failed = Number(attribute("failures") ?? 0) + Number(attribute("errors") ?? 0) > 0;
       suites.set(attribute("name"), failed ? "FAIL" : "PASS");
     }
-    const status = (name) => suites.get(name) ?? "MISSING";
+    // The benchmark cuts some subtest names short ("a/b" for "a/b/c"); a parent fails when a subtest does.
+    const status = (name) => suites.get(name) ?? suites.get(name.split("/")[0]) ?? "MISSING";
     const failing = (names) => names.filter((name) => status(name) !== "PASS").map((name) => `${name} (${status(name)})`);
-    const failToPass = failing(Object.keys(instance.f2p_tests));
-    const passToPass = failing(Object.keys(instance.p2p_tests));
+    // Tests that cannot pass in the offline grader (e.g. they need a network interface), per project.
+    const graded = (tests) => Object.keys(tests).filter((name) => !(project.grader.skip ?? []).includes(name.split("/")[0]));
+    const failToPass = failing(graded(instance.f2p_tests));
+    const passToPass = failing(graded(instance.p2p_tests));
     return { applied: true, failToPass, passToPass, passed: !failToPass.length && !passToPass.length, output: stdout.slice(-1500) };
   } finally {
     fs.rmSync(patchDir, { recursive: true, force: true });
