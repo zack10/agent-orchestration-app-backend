@@ -398,7 +398,7 @@ There is no list of supported languages: any language, framework or platform wor
 
 1. **The repository's configuration** (`verificationConfig.toolchain`, set with `POST` or `PATCH /api/repositories`).
 2. **The project's own devcontainer** (`.devcontainer/devcontainer.json` or `.devcontainer.json`): its `image`, `containerEnv`/`remoteEnv`, and its `onCreateCommand`, `updateContentCommand` and `postCreateCommand` as setup. Devcontainers that build a Dockerfile, use Docker Compose or add features aren't supported yet; what was skipped is reported.
-3. **The default image**, `EXECUTION_DEFAULT_IMAGE` (`mcr.microsoft.com/devcontainers/universal:2`, GitHub Codespaces' default, with the common languages installed). Pinned by digest; a 3.8 GB download (15 GB on disk), once per server. It has no Rust toolchain: a Rust repository needs its own image.
+3. **The default image**, `EXECUTION_DEFAULT_IMAGE` (`mcr.microsoft.com/devcontainers/universal:6.1.12`, GitHub Codespaces' default, Ubuntu 24.04 with the common languages installed: Java, Maven, Gradle, Python, Node, Go, .NET, PHP, Ruby). Pinned by digest; about 15 GB on disk, downloaded once per server. It has no Rust toolchain: a Rust repository needs its own image.
 
 We never write an environment into the user's project. What was used, and why, is recorded as a `GRAPH_TOOLCHAIN_RESOLVED` event.
 

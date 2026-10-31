@@ -26,9 +26,11 @@ const parseAgentMode = (value: string | undefined): ExecutionAgentMode => {
 };
 
 // GitHub Codespaces' default image (built from github.com/devcontainers/images).
-// Pinned to the version tested on 2026-10-26; update deliberately.
+// Pinned to the version tested on 2026-10-31 (6.1.12, Ubuntu 24.04); update
+// deliberately. 2.x (Ubuntu 20.04) shipped an apt source with an expired key,
+// so no setup could install a system package.
 const DEFAULT_EXECUTION_IMAGE =
-  "mcr.microsoft.com/devcontainers/universal:2@sha256:dca6a985ffbbc74007a13b6f56ac0fbbc5febae081350b66e865a5549338134b";
+  "mcr.microsoft.com/devcontainers/universal:6.1.12@sha256:7d644a3e845e78e2175c9c265a383436c93ab740e77947bbcaff9592e39f7205";
 
 /** Like parsePositiveInt, but 0 is allowed (it switches a limit off). */
 const parseNonNegativeInt = (
