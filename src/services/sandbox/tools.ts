@@ -132,7 +132,7 @@ export const SANDBOX_TOOLS: ToolDefinition[] = [
   },
   {
     name: "read_file",
-    description: `Read a file with line numbers. At most ${TOOL_OUTPUT_DEFAULTS.maxReadLines} lines per call; use startLine/endLine to page through larger files.`,
+    description: `Read a file. Each line is shown as its number, a tab, then the line; the number and the tab are not part of the file. At most ${TOOL_OUTPUT_DEFAULTS.maxReadLines} lines per call; use startLine/endLine to page through larger files.`,
     parameters: {
       type: "object",
       properties: {
@@ -163,7 +163,7 @@ export const SANDBOX_TOOLS: ToolDefinition[] = [
       type: "object",
       properties: {
         path: { type: "string", description: "File path relative to the repository root" },
-        oldText: { type: "string", description: "Exact text to replace, or empty to create a new file" },
+        oldText: { type: "string", description: "Exact text to replace, with its indentation as in the file and without read_file's line numbers and the tab after them; or empty to create a new file" },
         newText: { type: "string", description: "Replacement text (the whole content for a new file)" },
       },
       required: ["path", "oldText", "newText"],
@@ -413,7 +413,8 @@ const readFile = (ctx: ToolContext, args: z.infer<typeof ARGS.read_file>) => {
   const end = Math.min(args.endLine ?? lines.length, lines.length, start + limit(ctx, "maxReadLines") - 1);
   const body = lines
     .slice(start - 1, end)
-    .map((line, index) => `${start + index}: ${line}`)
+    // A tab, as `cat -n` does: with "12: " models copied the space into edit_file's oldText.
+    .map((line, index) => `${start + index}\t${line}`)
     .join("\n");
   const more = end < lines.length ? `\n[more: lines ${end + 1}-${lines.length}; call read_file with startLine ${end + 1}]` : "";
   return completed(cap(ctx, `${target.relativePath} (lines ${start}-${end} of ${lines.length})\n${body}${more}`));

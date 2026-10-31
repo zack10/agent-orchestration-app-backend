@@ -73,14 +73,17 @@ test("list_files skips node_modules and .git", async (t) => {
 test("read_file returns numbered line ranges and says how to continue", async (t) => {
   const { root, ctx } = workspace(t);
   const whole = await run(ctx, "read_file", { path: "src/math.js" });
-  assert.match(whole.output, /^src\/math.js \(lines 1-5 of 5\)\n1: function add\(a, b\) \{\n2:   return a - b;/);
+  assert.match(whole.output, /^src\/math.js \(lines 1-5 of 5\)\n1\tfunction add\(a, b\) \{\n2\t  return a - b;/);
+  // What a model copies after the tab is the line exactly as the file has it.
+  const copied = whole.output.split("\n").slice(1, 3).map((line) => line.slice(line.indexOf("\t") + 1)).join("\n");
+  assert.ok(fs.readFileSync(path.join(root, "src/math.js"), "utf8").includes(copied));
 
   fs.writeFileSync(path.join(root, "big.js"), Array.from({ length: 1000 }, (_, i) => `line ${i + 1}`).join("\n"));
   const first = await run(ctx, "read_file", { path: "big.js" });
   assert.match(first.output, /lines 1-400 of 1000/);
   assert.match(first.output, /call read_file with startLine 401/);
   const range = await run(ctx, "read_file", { path: "big.js", startLine: 990, endLine: 2000 });
-  assert.match(range.output, /lines 990-1000 of 1000\)\n990: line 990/);
+  assert.match(range.output, /lines 990-1000 of 1000\)\n990\tline 990/);
 });
 
 test("paths outside the repository, git metadata and symlinks are denied", async (t) => {
