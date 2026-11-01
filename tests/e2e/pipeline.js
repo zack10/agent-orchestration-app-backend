@@ -96,6 +96,21 @@ const waitForAnyStatus = (executionId, targets, timeoutMs) =>
   );
 
 /**
+ * Waits for the plan step (clone, triage, plan) and approves the plan through
+ * the API, as a person would. Returns false when the execution ended there
+ * instead, e.g. because the agent declined the ticket.
+ */
+const approvePlan = async (executionId, timeoutMs) => {
+  const planned = await waitForAnyStatus(executionId, ["AWAITING_PLAN_APPROVAL", ...FAILED_STATES], timeoutMs);
+  if (planned.status !== "AWAITING_PLAN_APPROVAL") return false;
+  await api("POST", `/api/executions/${executionId}/approvals/plan`, {
+    body: { approved: true, snapshotHash: pendingApproval(planned, "PLAN").snapshotHash },
+    expectStatus: 200,
+  });
+  return true;
+};
+
+/**
  * Reuses the long-lived e2e project/agent/repository/integration so runs don't pile up rows.
  * `repo` and `label` pick another sandbox repository and the card label its integration picks up.
  */
@@ -206,6 +221,7 @@ const ingestCard = async ({ integration, project }, cardId) => {
 module.exports = {
   FAILED_STATES,
   PIPELINE_ENV,
+  approvePlan,
   createCard,
   ensureFixtures,
   getExecution,

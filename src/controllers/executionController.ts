@@ -9,6 +9,7 @@ import { StoredProposal } from "../services/toolchain/discovery";
 import {
   createExecution,
   decideApproval,
+  requestPlanRevision,
   submitPlan,
 } from "../services/executionService";
 import { syncIntegrationConnection } from "../services/ingestionService";
@@ -213,7 +214,13 @@ export const getExecution = asyncHandler(
 export const createPlan = asyncHandler(async (req: Request, res: Response) => {
   res.status(201).json(await submitPlan(req.params.id, req.body));
 });
+/** Approve, reject, or (plan only) answer with feedback so the agent revises the plan. */
 export const approve = asyncHandler(async (req: Request, res: Response) => {
+  if (req.body.revise) {
+    if (req.params.type !== "plan") throw AppError.badRequest("Only a plan can be revised");
+    res.json(await requestPlanRevision(req.params.id, req.body.snapshotHash, config.apiAuthActor, req.body.comment));
+    return;
+  }
   res.json(
     await decideApproval(
       req.params.id,

@@ -36,6 +36,7 @@ const {
 } = require("./codingEval");
 const {
   PIPELINE_ENV,
+  approvePlan,
   createCard,
   ensureFixtures,
   github,
@@ -51,7 +52,8 @@ const execFileAsync = promisify(execFile);
 const PROJECTS_FILE = path.join(__dirname, "reference-projects", "projects.json");
 const CACHE_DIR = path.resolve(__dirname, "..", "..", "scratch", "reference-cache");
 const REPORT_DIR = path.resolve(__dirname, "..", "..", "docs", "testing");
-const PLAN_TIMEOUT_MS = envInt("E2E_PLAN_TIMEOUT_MS", 120_000);
+// The plan step clones the repository and makes the triage and plan calls.
+const PLAN_TIMEOUT_MS = envInt("E2E_PLAN_TIMEOUT_MS", 600_000);
 // Real builds are slower than the benchmark's: discovery, setup and checks.
 const RUN_TIMEOUT_MS = envInt("E2E_REFERENCE_RUN_TIMEOUT_MS", 2_700_000);
 const RUN_END_STATES = ["AWAITING_PUBLISH_APPROVAL", "BLOCKED", "FAILED", "CANCELED"];
@@ -222,11 +224,7 @@ const runProject = async (fixtures, project, publish) => {
     result.executionId = detail.executions[0].id;
     log(`${project.id}: execution ${result.executionId}`);
 
-    const planned = await waitForStatus(result.executionId, "AWAITING_PLAN_APPROVAL", PLAN_TIMEOUT_MS);
-    await api("POST", `/api/executions/${result.executionId}/approvals/plan`, {
-      body: { approved: true, snapshotHash: pendingApproval(planned, "PLAN").snapshotHash, comment: `reference ${id}` },
-      expectStatus: 200,
-    });
+    await approvePlan(result.executionId, PLAN_TIMEOUT_MS);
     const execution = await waitForAnyStatus(result.executionId, RUN_END_STATES, RUN_TIMEOUT_MS);
     Object.assign(result, eventMetrics(execution.events), usageMetrics(execution.usage));
     if (execution.baseSha && execution.baseSha !== baseSha) throw new Error(`run used base ${execution.baseSha}, expected ${baseSha}`);

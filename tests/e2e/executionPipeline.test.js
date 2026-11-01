@@ -23,7 +23,7 @@ const {
   waitForStatus,
 } = require("./pipeline");
 
-const PLAN_TIMEOUT_MS = envInt("E2E_PLAN_TIMEOUT_MS", 120_000);
+const PLAN_TIMEOUT_MS = envInt("E2E_PLAN_TIMEOUT_MS", 600_000);
 const RUN_TIMEOUT_MS = envInt("E2E_RUN_TIMEOUT_MS", 1_200_000);
 const PUBLISH_TIMEOUT_MS = envInt("E2E_PUBLISH_TIMEOUT_MS", 300_000);
 

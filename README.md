@@ -144,26 +144,43 @@ sequenceDiagram
     API->>T: poll board (or POST /integrations/:id/sync)
     T-->>API: cards with the eligible label
     API->>API: upsert WorkItem, create Execution (idempotent per card revision)
-    API->>API: plan worker submits plan → AWAITING_PLAN_APPROVAL
-    API->>T: comment "plan awaiting approval"
-    Human->>API: POST /approvals/plan {snapshotHash}
+    API->>GH: pin base SHA, clone it
+    API->>L: triage (may decline), then the plan with its examples and questions
+    API->>API: submit the agent's plan → AWAITING_PLAN_APPROVAL
+    API->>T: comment with the plan and how to answer
+    loop until approved, rejected or PLAN_MAX_VERSIONS
+        Human->>T: reply /approve, /reject <reason>, or feedback
+        API->>T: read replies when polling (the API takes the same decisions)
+        API->>L: on feedback, a revised plan, commented again
+    end
     API->>G: run worker claims execution (lease)
-    G->>GH: base SHA + installation token
-    G->>D: clone at base SHA, resolve environment, setup (no token)
-    G->>L: triage (may decline), internal plan, then file edits
+    G->>D: clone the pinned SHA, resolve environment, setup (no token)
+    G->>L: file edits following the approved plan
     G->>D: write files, run the repository's checks (network off)
     G->>L: review the diff
     G->>API: store DIFF artifact → AWAITING_PUBLISH_APPROVAL
-    opt reviewer still objects after the last attempt
-        API->>T: comment with the reviewer's objections
-    end
-    Human->>API: POST /approvals/publish {snapshotHash = diff hash}
+    API->>T: comment with the changed files, checks and any reviewer objections
+    Human->>T: reply /approve or /reject <reason> (or POST /approvals/publish {snapshotHash = diff hash})
     API->>D: fresh clone, git apply approved diff, push branch
     API->>GH: open draft pull request
     API->>T: comment with PR link
 ```
 
 Both approvals must quote the `snapshotHash` of the pending approval, so a reviewer can only approve exactly what they saw. The publish step re-checks that hash against the stored diff and that the base branch has not moved.
+
+### Deciding on the ticket
+
+The plan step reads the ticket and the repository at a pinned commit and posts the agent's plan on the ticket: what it understood as concrete examples ("given ..., the result is ..."), the readings it is unsure between, the files it expects to change and how it will check them. The run later clones the same commit and follows the approved plan.
+
+People decide by replying on the ticket, or through the API (a frontend is just another client of it):
+
+| Reply on the ticket | API | Effect |
+| --- | --- | --- |
+| `/approve [note]` | `POST /executions/:id/approvals/plan` `{ approved: true, snapshotHash }` | Plan approved; the note reaches the agent with the plan |
+| any other text | `{ approved: false, revise: true, comment, snapshotHash }` | The agent revises the plan with that feedback and posts the next version (at most `PLAN_MAX_VERSIONS`, default 5, then BLOCKED) |
+| `/reject [reason]` | `{ approved: false, comment, snapshotHash }` | Execution canceled |
+
+On a change waiting to be published, `/approve` opens the draft PR and `/reject [reason]` cancels; other text gets a hint. Only approvers decide: the tracker connection's config lists them (`"approvers": ["trello-username-or-member-id"]`). Without that list, replies are not read at all and only the API decides. Only `/approve` approves, so free text can at worst cost a revised plan. A reply counts once, and only when it was written after the pending approval was requested (replies written while the agent is revising are not read). The agent signs its own comments ("— Agent Orchestrator") and never reads a signed comment as a reply, since locally it posts with the person's Trello token. Replies are read when the tracker is polled (`INTEGRATION_POLL_INTERVAL_MS`).
 
 ### Execution states
 
@@ -172,6 +189,9 @@ stateDiagram-v2
     [*] --> INGESTED: card synced
     INGESTED --> PLANNING: plan worker
     PLANNING --> AWAITING_PLAN_APPROVAL: plan submitted
+    PLANNING --> BLOCKED: ticket declined
+    AWAITING_PLAN_APPROVAL --> PLANNING: feedback (revise)
+    AWAITING_PLAN_APPROVAL --> BLOCKED: PLAN_MAX_VERSIONS plans
     AWAITING_PLAN_APPROVAL --> QUEUED: plan approved
     AWAITING_PLAN_APPROVAL --> CANCELED: plan rejected
     QUEUED --> RUNNING: run worker claims lease
@@ -179,7 +199,7 @@ stateDiagram-v2
     RUNNING --> QUEUED: transient error / lease expired
     VERIFYING --> QUEUED: transient error / lease expired
     VERIFYING --> AWAITING_PUBLISH_APPROVAL: verified diff (reviewed, or with the reviewer's objections)
-    RUNNING --> BLOCKED: ticket declined / 3 failed attempts
+    RUNNING --> BLOCKED: 3 failed attempts
     VERIFYING --> BLOCKED: 3 failed attempts
     AWAITING_PUBLISH_APPROVAL --> PUBLISHING: diff approved
     AWAITING_PUBLISH_APPROVAL --> CANCELED: diff rejected
@@ -195,7 +215,7 @@ stateDiagram-v2
     end note
 ```
 
-- A server works on `EXECUTION_RUN_CONCURRENCY` runs at once (default 1). Runs hold a lease (`EXECUTION_LEASE_MS`) renewed by a heartbeat. If a worker dies, a sweep requeues the run once the lease expires.
+- A server works on `EXECUTION_RUN_CONCURRENCY` runs and `EXECUTION_PLAN_CONCURRENCY` plan steps at once (default 1 each). Runs hold a lease (`EXECUTION_LEASE_MS`) renewed by a heartbeat. If a worker dies, a sweep requeues the run once the lease expires.
 - A requeued run resumes from its last completed graph step (`GraphCheckpoint`), not from the clone. A failed model call is retried with backoff before it fails the step.
 - Transient failures are retried; a moved base branch, a changed diff, exhausted LLM credits or a long quota wait fail immediately.
 - Trello gets a comment on plan, block, failure and PR creation, and when a change reaches publish approval with the reviewer's objections.
@@ -483,7 +503,7 @@ Behaviour worth knowing:
 | API access | `API_AUTH_TOKEN`, `API_AUTH_ACTOR`, `AUTH_DISABLED`, `CORS_ORIGINS`, `API_RATE_LIMIT_PER_MINUTE` |
 | LLM | `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `LLM_PROVIDERS`, `LLM_DEFAULT_PROVIDER`, `LLM_DEFAULT_MODEL`, `LLM_DAILY_TOKEN_LIMIT`, `LLM_REQUEST_TIMEOUT_MS`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_RATE_LIMIT_RETRIES` |
 | Task pipeline | `TASK_MAX_ATTEMPTS`, `TASK_RETRY_DELAY_MS`, `TASK_LEASE_MS`, `GENERATED_CODE_MAX_FILES`, `GENERATED_CODE_MAX_FILE_BYTES`, `STORE_RAW_LLM_OUTPUT` |
-| Execution pipeline | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `INTEGRATION_POLL_INTERVAL_MS`, `EXECUTION_LEASE_MS`, `EXECUTION_RUN_CONCURRENCY`, `EXECUTION_AGENT_MODE`, `AGENT_MAX_STEPS`, `EXECUTION_MAX_TOKENS`, `EXECUTION_MAX_DURATION_SECONDS`, `WORKSPACE_ROOT`, `KEEP_WORKSPACES`, `ARTIFACT_ROOT` |
+| Execution pipeline | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `INTEGRATION_POLL_INTERVAL_MS`, `EXECUTION_LEASE_MS`, `EXECUTION_RUN_CONCURRENCY`, `EXECUTION_PLAN_CONCURRENCY`, `PLAN_MAX_VERSIONS`, `EXECUTION_AGENT_MODE`, `AGENT_MAX_STEPS`, `EXECUTION_MAX_TOKENS`, `EXECUTION_MAX_DURATION_SECONDS`, `WORKSPACE_ROOT`, `KEEP_WORKSPACES`, `ARTIFACT_ROOT` |
 | Messaging | `CONSUMER_MAX_ATTEMPTS`, `CONSUMER_RETRY_DELAY_MS` |
 | HTTP connector | `MCP_HTTP_ALLOWED_HOSTS`, `MCP_HTTP_ALLOW_PRIVATE_IPS`, `MCP_HTTP_TIMEOUT_MS`, `MCP_HTTP_MAX_RESPONSE_BYTES` |
 

@@ -6,7 +6,6 @@ import { ExecutionAgentMode, config } from "../../config";
 import prisma from "../../db";
 import { getBaseSha, getInstallationToken } from "../../integrations/githubApp";
 import { writeActionsToRoot } from "../../utils/codeWriter";
-import { decrypt } from "../../utils/crypto";
 import {
   EXECUTION_PROMPTS,
   ExecutionPromptName,
@@ -17,10 +16,16 @@ import {
 import { NonRetryableError } from "../../utils/safeError";
 import { parseAgentOutput } from "../../utils/llmUtils";
 import { hashSnapshot } from "../executionService";
-import { LLMService } from "../llm/LLMService";
-import { ReasoningEffort, ToolRequest } from "../llm/types";
-import { TokenLimitError, prismaUsageLedger } from "../llm/usageLedger";
 import { DurableCheckpointSaver, prismaCheckpointStore } from "./checkpointer";
+import {
+  askAgent,
+  askAgentWithTools,
+  executionTokensUsed,
+  graphEvent,
+  parseJsonRecord,
+  resolveAgentCalls,
+} from "./agentCalls";
+import type { CallModel, ReasoningEffortConfig } from "./agentCalls";
 import { ReviewVerdict, SANDBOX_TOOLS, describeReproduction } from "../sandbox/tools";
 import { REVIEW_MAX_TOKENS, reviewOutcome, runReviewer } from "./reviewer";
 import {
@@ -67,9 +72,9 @@ import { AgentStep, AgentStopReason, attemptAllowance, describeAttempt, runAgent
 import { reviewDiffSafety } from "./diffReview";
 import { fileActionsError } from "./outputFormat";
 import { RepoContext, collectRepoContext } from "./repoContext";
+import { describeApprovedPlan } from "./planning";
 import { RepositoryPolicy, checkExistingTests, checkRepositoryPolicy } from "./repoPolicy";
 
-const llm = new LLMService();
 const MAX_ATTEMPTS = 3;
 const DEFAULT_ATTEMPT_SHARE = 0.5;
 const FILE_BLOCK_FORMAT = executionPromptFragment("fileFormat");
@@ -85,9 +90,6 @@ type GraphRoute =
   | "skipped"
   | "proceed"
   | undefined;
-
-type ReasoningEffortConfig = Partial<Record<ExecutionPromptName, ReasoningEffort>>;
-type CallModel = { provider: string; model: string; apiKey?: string };
 
 const ExecutionGraphState = Annotation.Root({
   executionId: Annotation<string>(),
@@ -173,62 +175,6 @@ const ExecutionGraphState = Annotation.Root({
 
 type GraphState = typeof ExecutionGraphState.State;
 
-const requireAgent = (state: GraphState) => {
-  if (!state.agentProvider || !state.agentModel)
-    throw new Error("Execution graph is missing the agent's provider or model");
-  return { provider: state.agentProvider, model: state.agentModel };
-};
-
-/** The kind of call a prompt version belongs to (its EXECUTION_PROMPTS name). */
-const callKind = (version: string) =>
-  (Object.keys(EXECUTION_PROMPTS) as ExecutionPromptName[]).find((key) => EXECUTION_PROMPTS[key] === version);
-
-/** The configured effort for the call a prompt version belongs to; unset leaves the model's default. */
-const effortFor = (state: GraphState, version: string) => {
-  const name = callKind(version);
-  return name ? state.reasoningEffort[name] : undefined;
-};
-
-/** The model a call runs on: the one configured for its kind, else the agent's own. */
-const modelFor = (state: GraphState, version: string): CallModel => {
-  const name = callKind(version);
-  return (name && state.callModels[name]) || { ...requireAgent(state), apiKey: state.agentApiKey };
-};
-
-/** Tokens every model call of this execution has used, from the usage ledger. */
-const executionTokensUsed = (state: GraphState) =>
-  prismaUsageLedger.tokensUsedByExecution(state.executionId);
-
-/**
- * Sends a prompt to the run's agent (provider and model resolved in
- * load_context). Refused once the execution's token budget is used up,
- * which covers the plan, review and analysis calls as well as the loop.
- */
-const askAgent = async (state: GraphState, prompt: RenderedPrompt) => {
-  const { provider, model, apiKey } = modelFor(state, prompt.version);
-  const used = await executionTokensUsed(state);
-  if (used >= state.maxTokens)
-    throw new TokenLimitError(
-      `Execution token budget reached: ${used} of ${state.maxTokens} tokens used (budget.maxTokens)`,
-    );
-  return llm.generateContent(provider, model, { ...prompt, reasoningEffort: effortFor(state, prompt.version) }, apiKey, {
-    purpose: prompt.version,
-    executionId: state.executionId,
-  });
-};
-
-const askAgentWithTools = (
-  state: GraphState,
-  request: ToolRequest,
-  purpose: string,
-) => {
-  const { provider, model, apiKey } = modelFor(state, purpose);
-  return llm.generateWithTools(provider, model, { ...request, reasoningEffort: effortFor(state, purpose) }, apiKey, {
-    purpose,
-    executionId: state.executionId,
-  });
-};
-
 /** The prompts a mode actually uses, recorded with every run. */
 const promptVersionsFor = (mode: ExecutionAgentMode) => {
   const { implement, fileFormat, agent, review, reviewer, ...shared } = EXECUTION_PROMPTS;
@@ -250,45 +196,8 @@ const positive = (value: unknown, fallback: number) =>
     ? value
     : fallback;
 
-const parseJsonRecord = (raw: string) => {
-  const candidate = raw.trim().replace(/^```(?:json)?\s*/i, "");
-  const clean = candidate.endsWith("```")
-    ? candidate.slice(0, -3).trimEnd()
-    : candidate;
-  try {
-    return JSON.parse(clean) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
-};
-
 const canRetry = (state: typeof ExecutionGraphState.State) =>
   state.attemptNumber < MAX_ATTEMPTS;
-
-const graphEvent = async (
-  executionId: string,
-  type: string,
-  payload: unknown = {},
-) => {
-  const execution = await prisma.execution.findUniqueOrThrow({
-    where: { id: executionId },
-    select: { correlationId: true },
-  });
-  const latest = await prisma.executionEvent.findFirst({
-    where: { executionId },
-    orderBy: { sequence: "desc" },
-    select: { sequence: true },
-  });
-  await prisma.executionEvent.create({
-    data: {
-      executionId,
-      sequence: (latest?.sequence ?? 0) + 1,
-      type,
-      payload: payload as Prisma.InputJsonValue,
-      correlationId: execution.correlationId,
-    },
-  });
-};
 
 /** An unapproved environment the run uses, for the PR body. */
 export interface ProposedEnvironment {
@@ -412,6 +321,11 @@ const loadExecutionContext = async (
         orderBy: { version: "desc" },
         take: 1,
       },
+      approvals: {
+        where: { type: "PLAN", status: "APPROVED" },
+        orderBy: { decidedAt: "desc" },
+        take: 1,
+      },
     },
   });
   // The worker claims the execution (status RUNNING + lease) before invoking the graph.
@@ -423,15 +337,20 @@ const loadExecutionContext = async (
   const agent = execution.project.agents[0];
   if (!agent) throw new Error("Project has no implementation agent");
 
-  const planTask = execution.plans[0]?.tasks[0];
+  const approvedPlan = execution.plans[0];
+  const planTask = approvedPlan?.tasks[0];
   if (!planTask) throw new Error("Approved plan has no task");
+  const internalPlan = describeApprovedPlan(approvedPlan, execution.approvals[0]);
 
-  const baseSha = await getBaseSha(
-    execution.repository.githubInstallationId,
-    execution.repository.owner,
-    execution.repository.name,
-    execution.repository.defaultBranch,
-  );
+  // The commit the plan was made on; a plan submitted through the API has none yet.
+  const baseSha =
+    execution.baseSha ??
+    (await getBaseSha(
+      execution.repository.githubInstallationId,
+      execution.repository.owner,
+      execution.repository.name,
+      execution.repository.defaultBranch,
+    ));
   const githubToken = await getInstallationToken(
     execution.repository.githubInstallationId,
   );
@@ -452,31 +371,8 @@ const loadExecutionContext = async (
   const deadline =
     Date.now() + positive(policy?.maxRunSeconds ?? budget.maxDurationSeconds, 1800) * 1000;
   const attemptShare = Math.min(1, positive(budget.attemptShare, DEFAULT_ATTEMPT_SHARE));
-  const resolved = llm.resolveModel(agent);
-  const agentConfig = agent.config as
-    | {
-        apiKey?: string;
-        reviewer?: CallModel;
-        models?: Partial<Record<ExecutionPromptName, CallModel>>;
-        reasoningEffort?: ReasoningEffortConfig;
-      }
-    | null;
-  const reasoningEffort = agentConfig?.reasoningEffort ?? {};
-  const agentApiKey = agentConfig?.apiKey
-    ? decrypt(agentConfig.apiKey)
-    : undefined;
-  // config.reviewer is the older form of models.review and models.reviewer.
-  const { reviewer } = agentConfig ?? {};
-  const callModels = Object.fromEntries(
-    Object.entries({ ...(reviewer ? { review: reviewer, reviewer } : {}), ...agentConfig?.models }).map(
-      ([name, entry]) => {
-        const model = llm.resolveModel(entry);
-        // Without its own key, a model of the agent's provider uses the agent's key.
-        const apiKey = entry.apiKey ? decrypt(entry.apiKey) : model.provider === resolved.provider ? agentApiKey : undefined;
-        return [name, { ...model, apiKey }];
-      },
-    ),
-  ) as Partial<Record<ExecutionPromptName, CallModel>>;
+  const calls = resolveAgentCalls(agent);
+  const { callModels, reasoningEffort } = calls;
 
   // The repository's configuration or the project's own definition decides
   // the image, setup step and checks; nothing is chosen per language.
@@ -494,10 +390,7 @@ const loadExecutionContext = async (
   });
   // Discovery's model calls count against this execution's budget.
   const ask = (prompt: RenderedPrompt) =>
-    askAgent(
-      { ...state, agentProvider: resolved.provider, agentModel: resolved.model, agentApiKey, maxTokens, reasoningEffort, callModels },
-      prompt,
-    );
+    askAgent({ ...state, ...calls, maxTokens }, prompt);
   // Later commands run in the snapshot taken after setup and the baseline checks.
   const { toolchain, setup, environmentProposal } = await prepareEnvironment(
     execution.id,
@@ -531,15 +424,17 @@ const loadExecutionContext = async (
       : {}),
     ...(Object.keys(reasoningEffort).length ? { reasoningEffort } : {}),
   });
+  // The plan the run follows (the approved one), under the event the reviewer eval reads.
+  await graphEvent(execution.id, "GRAPH_INTERNAL_PLAN_CREATED", {
+    internalPlan,
+    planVersion: approvedPlan.version,
+  });
 
   return {
     baseSha,
     planTaskId: planTask.id,
-    agentProvider: resolved.provider,
-    agentModel: resolved.model,
-    agentApiKey,
-    callModels,
-    reasoningEffort,
+    internalPlan,
+    ...calls,
     ticket: `${execution.workItem.title}\n${execution.workItem.description ?? ""}`,
     agentMode,
     maxSteps,
@@ -577,75 +472,6 @@ const inspectRepository = async (state: typeof ExecutionGraphState.State) => {
     toolchain: describeToolchain(requireToolchain(state)),
   });
   return { repoContext };
-};
-
-/** Starts the lastError of a run that stopped to ask the ticket's author a question. */
-export const NEEDS_ANSWER = "The agent needs an answer before changing anything: ";
-
-export const triageDecision = (parsed: Record<string, unknown>) => {
-  const reason = String(parsed.reason ?? "No reason given.");
-  const question = typeof parsed.question === "string" ? parsed.question.trim() : "";
-  // An "ask" without a question has nothing to show the author, so it proceeds.
-  const decision =
-    parsed.decision === "decline" ? "decline" : parsed.decision === "ask" && question ? "ask" : "proceed";
-  return { decision, reason, question } as const;
-};
-
-/**
- * Whether the ticket should be done at all, asked apart from how: an agent
- * already planning tends to build something even for a ticket it cannot do.
- * Only an explicit decline blocks; an unclear reply proceeds to the reviewer.
- */
-const triageTicket = async (state: typeof ExecutionGraphState.State) => {
-  if (!state.ticket || !state.repoContext) {
-    throw new Error("Execution graph is missing triage context");
-  }
-  const prompt = renderExecutionPrompt("triage", {
-    ticket: state.ticket,
-    environment: state.environment ?? "Unknown.",
-    repoContext: state.repoContext.summary,
-  });
-  const { decision, reason, question } = triageDecision(parseJsonRecord(await askAgent(state, prompt)));
-  await graphEvent(state.executionId, "GRAPH_TICKET_TRIAGED", {
-    decision,
-    reason,
-    ...(decision === "ask" && { question }),
-    promptVersion: prompt.version,
-  });
-  if (decision === "decline")
-    return { lastFailure: `The agent declined the ticket: ${reason}`, route: "blocked" as const };
-  if (decision === "ask")
-    return { lastFailure: `${NEEDS_ANSWER}${question}`, route: "blocked" as const };
-  return { route: "proceed" as const };
-};
-
-const planChange = async (state: typeof ExecutionGraphState.State) => {
-  if (!state.ticket || !state.repoContext) {
-    throw new Error("Execution graph is missing planning context");
-  }
-  const prompt = renderExecutionPrompt("plan", {
-    ticket: state.ticket,
-    environment: state.environment ?? "Unknown.",
-    repoContext: state.repoContext.summary,
-  });
-  const raw = await askAgent(state, prompt);
-  const parsed = parseJsonRecord(raw);
-  const internalPlan = JSON.stringify(
-    {
-      summary: parsed.summary ?? "Implement the ticket with minimal changes.",
-      expectedBehaviour: parsed.expectedBehaviour ?? [],
-      filesToEdit: parsed.filesToEdit ?? state.repoContext.selectedFiles,
-      risk: parsed.risk ?? "unknown",
-      testStrategy: parsed.testStrategy ?? state.repoContext.checks,
-    },
-    null,
-    2,
-  );
-  await graphEvent(state.executionId, "GRAPH_INTERNAL_PLAN_CREATED", {
-    internalPlan,
-    promptVersion: prompt.version,
-  });
-  return { internalPlan };
 };
 
 const startAttempt = async (state: GraphState) => {
@@ -1218,8 +1044,6 @@ const checkpointer = new DurableCheckpointSaver(prismaCheckpointStore);
 const graph = new StateGraph(ExecutionGraphState)
   .addNode("load_context", loadExecutionContext)
   .addNode("inspect_repo", inspectRepository)
-  .addNode("triage_ticket", triageTicket)
-  .addNode("plan_change", planChange)
   .addNode("implement_change", implementChange)
   .addNode("agent_loop", agentLoop)
   .addNode("enforce_policy", enforceRepositoryPolicy)
@@ -1230,12 +1054,7 @@ const graph = new StateGraph(ExecutionGraphState)
   .addNode("create_diff_artifact", createDiffArtifact)
   .addEdge(START, "load_context")
   .addEdge("load_context", "inspect_repo")
-  .addEdge("inspect_repo", "triage_ticket")
-  .addConditionalEdges("triage_ticket", routeAfterVerification, {
-    proceed: "plan_change",
-    blocked: "block_execution",
-  })
-  .addConditionalEdges("plan_change", implementNode, {
+  .addConditionalEdges("inspect_repo", implementNode, {
     implement_change: "implement_change",
     agent_loop: "agent_loop",
   })

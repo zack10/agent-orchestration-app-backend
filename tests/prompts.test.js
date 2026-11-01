@@ -108,7 +108,7 @@ const variables = {
 const ENVIRONMENT = "Image: example/image:1\nChecks:\n- test: make test";
 const current = {
   ...variables,
-  plan: { ...variables.plan, environment: ENVIRONMENT },
+  plan: { ...variables.plan, environment: ENVIRONMENT, revisions: "None: this is the first plan." },
   implement: { ...variables.implement, environment: ENVIRONMENT },
   analyze: { ...variables.analyze, workspace: "The repository is back at the unmodified code." },
   review: { ...variables.review, reproduction: "A new test failed before the code changed." },
@@ -172,6 +172,7 @@ test("values are inserted as-is, never expanded again", () => {
     ticket: "Literal {{repoContext}} and $& in the ticket",
     environment: ENVIRONMENT,
     repoContext: "context",
+    revisions: "None.",
   });
   assert.match(prompt.user, /Literal \{\{repoContext\}\} and \$& in the ticket/);
 });
@@ -296,6 +297,6 @@ test("the prompts in use name no language, package manager or file type", () => 
   }
   assert.deepEqual(
     rendered.map((prompt) => prompt.version),
-    ["plan.v4", "implement.v2", "analyze.v2", "review.v6", "agent.v6", "discover.v3", "triage.v2", "reviewer.v5"],
+    ["plan.v5", "implement.v2", "analyze.v2", "review.v6", "agent.v6", "discover.v3", "triage.v1", "reviewer.v5"],
   );
 });

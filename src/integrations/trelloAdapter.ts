@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import axios from "axios";
 import crypto from "node:crypto";
-import { IssueTrackerAdapter, NormalizedWorkItem } from "./types";
+import { IssueTrackerAdapter, NormalizedWorkItem, TrackerComment } from "./types";
 
 interface TrelloConfig {
   apiKey: string;
@@ -18,6 +18,27 @@ export interface TrelloCard {
   idList: string;
   labels: Array<{ name: string }>;
 }
+/** A card's "commentCard" action, as GET /cards/:id/actions returns it. */
+export interface TrelloCommentAction {
+  id: string;
+  date: string;
+  idMemberCreator: string;
+  memberCreator?: { username?: string; fullName?: string };
+  data: { text?: string };
+}
+
+/** Comments oldest first; Trello lists actions newest first. */
+export const toComments = (actions: TrelloCommentAction[]): TrackerComment[] =>
+  actions
+    .map((action) => ({
+      id: action.id,
+      authorId: action.idMemberCreator,
+      authorName: action.memberCreator?.username ?? action.idMemberCreator,
+      text: action.data.text ?? "",
+      createdAt: new Date(action.date),
+    }))
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+
 const asConfig = (value: Record<string, unknown>): TrelloConfig =>
   value as unknown as TrelloConfig;
 
@@ -91,5 +112,24 @@ export const trelloAdapter: IssueTrackerAdapter = {
         timeout: 15000,
       },
     );
+  },
+
+  async fetchComments(rawConfig, cardId, since) {
+    const config = asConfig(rawConfig);
+    const response = await axios.get<TrelloCommentAction[]>(
+      `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}/actions`,
+      {
+        params: {
+          key: config.apiKey,
+          token: config.token,
+          filter: "commentCard",
+          since: since.toISOString(),
+          limit: 50,
+          memberCreator_fields: "username,fullName",
+        },
+        timeout: 15000,
+      },
+    );
+    return toComments(response.data);
   },
 };

@@ -32,6 +32,7 @@ const { api, assertServerHealthy, env, envInt, poll, runId, skipUnless } = requi
 const { cleanFiles, diffStats, grade, isTestFile, loadScenarios, loadSuites, scenarioFiles } = require("./codingScenarios");
 const {
   PIPELINE_ENV,
+  approvePlan,
   createCard,
   ensureFixtures,
   getExecution,
@@ -41,17 +42,15 @@ const {
   repoPath,
   trello,
   waitForAnyStatus,
-  waitForStatus,
 } = require("./pipeline");
 
 const execFileAsync = promisify(execFile);
 // The suite the sandbox repository is left on, which the other e2e suites expect.
 const DEFAULT_SUITE = "node";
-const PLAN_TIMEOUT_MS = envInt("E2E_PLAN_TIMEOUT_MS", 120_000);
+// The plan step clones the repository and makes the triage and plan calls.
+const PLAN_TIMEOUT_MS = envInt("E2E_PLAN_TIMEOUT_MS", 600_000);
 const RUN_TIMEOUT_MS = envInt("E2E_RUN_TIMEOUT_MS", 1_200_000);
 const RUN_END_STATES = ["AWAITING_PUBLISH_APPROVAL", "BLOCKED", "FAILED", "CANCELED"];
-// Same text as NEEDS_ANSWER in executionGraph.ts; the eval talks to the API, not dist/.
-const NEEDS_ANSWER = "The agent needs an answer before changing anything: ";
 const REPORT_DIR = path.resolve(__dirname, "..", "..", "docs", "testing");
 
 const OUTCOMES = {
@@ -177,12 +176,8 @@ const runScenario = async (fixtures, scenario, runNumber) => {
     result.executionId = detail.executions[0].id;
     log(`${scenario.id} run ${runNumber}: execution ${result.executionId}`);
 
-    const planned = await waitForStatus(result.executionId, "AWAITING_PLAN_APPROVAL", PLAN_TIMEOUT_MS);
-    await api("POST", `/api/executions/${result.executionId}/approvals/plan`, {
-      body: { approved: true, snapshotHash: pendingApproval(planned, "PLAN").snapshotHash, comment: `eval ${id}` },
-      expectStatus: 200,
-    });
-
+    // A declined ticket ends at the plan step; waiting for the run then returns at once.
+    await approvePlan(result.executionId, PLAN_TIMEOUT_MS);
     const execution = await waitForAnyStatus(result.executionId, RUN_END_STATES, RUN_TIMEOUT_MS);
     Object.assign(result, eventMetrics(execution.events), usageMetrics(execution.usage));
     if (execution.baseSha && execution.baseSha !== baseSha)
@@ -246,10 +241,7 @@ const runScenario = async (fixtures, scenario, runNumber) => {
       // The approver was warned, so it is not a silent wrong fix.
       if (objected && result.outcome === "wrong_fix_shipped") result.outcome = "wrong_fix_flagged";
     } else if (execution.status === "BLOCKED") {
-      // An "ask" scenario passes when the agent stopped to ask (or with a correct fix, graded above).
-      const asked = (execution.lastError ?? "").startsWith(NEEDS_ANSWER);
-      result.outcome =
-        scenario.expect === "blocked" || (scenario.expect === "ask" && asked) ? "correctly_blocked" : "no_fix";
+      result.outcome = scenario.expect === "blocked" ? "correctly_blocked" : "no_fix";
       result.note = (execution.lastError ?? "").replace(/\s+/g, " ").slice(0, 200);
     } else {
       result.note = `${execution.status}: ${(execution.lastError ?? "").replace(/\s+/g, " ").slice(0, 200)}`;

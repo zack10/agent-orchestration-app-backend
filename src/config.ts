@@ -66,6 +66,10 @@ export const config = {
   executionLeaseMs: parsePositiveInt(process.env.EXECUTION_LEASE_MS, 300_000),
   // Run steps (agent loop, checks, review) one server works on at once.
   executionRunConcurrency: parsePositiveInt(process.env.EXECUTION_RUN_CONCURRENCY, 1),
+  // Plan steps (clone, triage, plan) one server works on at once.
+  executionPlanConcurrency: parsePositiveInt(process.env.EXECUTION_PLAN_CONCURRENCY, 1),
+  // Plans a person can ask to revise before the execution is blocked.
+  planMaxVersions: parsePositiveInt(process.env.PLAN_MAX_VERSIONS, 5),
   consumerMaxAttempts: parsePositiveInt(process.env.CONSUMER_MAX_ATTEMPTS, 3),
   consumerRetryDelayMs: parsePositiveInt(
     process.env.CONSUMER_RETRY_DELAY_MS,

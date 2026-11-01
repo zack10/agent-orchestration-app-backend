@@ -11,10 +11,12 @@ import {
 } from "../integrations/githubApp";
 import { commentOnWorkItem } from "./ingestionService";
 import { NonRetryableError, describeError } from "../utils/safeError";
-import { NEEDS_ANSWER, discardExecutionRun, runExecutionGraph } from "./agentGraph/executionGraph";
-import { hashSnapshot, submitPlan } from "./executionService";
+import { discardExecutionRun, runExecutionGraph } from "./agentGraph/executionGraph";
+import { planExecution } from "./agentGraph/planning";
+import { hashSnapshot } from "./executionService";
+import { formatPlanComment, formatPublishComment } from "./ticketConversation";
 import rabbitMQService from "./rabbitMQService";
-import { describeFailingBefore, describeReviewObjections, describeVerification, publishApprovedDiff } from "./workspaceService";
+import { describeVerification, publishApprovedDiff } from "./workspaceService";
 
 const TERMINAL: ExecutionStatus[] = ["COMPLETED", "BLOCKED", "FAILED", "CANCELED"];
 const RUN_STATES: ExecutionStatus[] = ["RUNNING", "VERIFYING"];
@@ -119,25 +121,18 @@ const plan = async (executionId: string) => {
       where: { id: executionId, status: "INGESTED" },
       data: { status: "PLANNING" },
     });
-  await submitPlan(executionId, {
-    summary: `Investigate and fix: ${execution.workItem.title}`,
-    acceptanceCriteria: [
-      execution.workItem.description || "The reported bug is fixed",
-      "Configured lint, build, and test checks pass",
-    ],
-    tasks: [
-      {
-        key: "implement-fix",
-        title: execution.workItem.title,
-        description: execution.workItem.description || execution.workItem.title,
-        type: "IMPLEMENT",
-      },
-    ],
-  });
-  await notifyTracker(
-    executionId,
-    `Agent Orchestrator created a plan. Execution ${executionId} is awaiting plan approval.`,
-  );
+  const outcome = await planExecution(executionId);
+  if (outcome.status === "declined") {
+    // Stopped before anyone is asked: there is nothing to approve.
+    const reason = `The agent declined the ticket: ${outcome.reason}`;
+    const blocked = await prisma.execution.updateMany({
+      where: { id: executionId, status: "PLANNING" },
+      data: { status: "BLOCKED", lastError: reason, completedAt: new Date() },
+    });
+    if (blocked.count) await notifyTracker(executionId, `${reason}\n\nEdit the ticket to start again.`);
+    return;
+  }
+  await notifyTracker(executionId, formatPlanComment(outcome.plan, outcome.version));
 };
 
 const leaseExpiry = () => new Date(Date.now() + config.executionLeaseMs);
@@ -197,25 +192,22 @@ const run = async (executionId: string) => {
     where: { id: executionId },
     select: { status: true, lastError: true },
   });
-  if (execution?.status === "BLOCKED") {
-    const reason = execution.lastError ?? "";
+  if (execution?.status === "BLOCKED")
     await notifyTracker(
       executionId,
-      reason.startsWith(NEEDS_ANSWER)
-        ? `${reason.slice(NEEDS_ANSWER.length)}\n\nAnswer by editing this ticket's description: the edit starts a new execution. (Execution ${executionId} stopped before changing any code.)`
-        : `Execution ${executionId} is blocked: ${reason.slice(0, 1500) || "see the execution evidence"}`,
+      `Execution ${executionId} is blocked: ${(execution.lastError ?? "").slice(0, 1500) || "see the execution evidence"}`,
     );
-  }
   if (execution?.status === "AWAITING_PUBLISH_APPROVAL") {
-    // The approver decides on a change the reviewer objected to, or one whose checks already failed, so tell them where they look.
+    // What changed and what the checks and the reviewer found, where the approver decides.
     const diff = await prisma.artifact.findFirst({
       where: { executionId, type: "DIFF" },
       orderBy: { createdAt: "desc" },
-      select: { metadata: true },
+      select: { metadata: true, storagePath: true },
     });
-    const warnings = [describeReviewObjections(diff?.metadata), describeFailingBefore(diff?.metadata)].filter(Boolean);
-    if (warnings.length)
-      await notifyTracker(executionId, `Execution ${executionId} is awaiting publish approval.\n\n${warnings.join("\n\n")}`);
+    const files = diff
+      ? [...new Set([...(await fs.readFile(diff.storagePath, "utf8")).matchAll(/^diff --git a\/\S+ b\/(\S+)$/gm)].map((match) => match[1]))]
+      : [];
+    await notifyTracker(executionId, formatPublishComment(files, describeVerification(diff?.metadata)));
   }
 };
 
@@ -386,7 +378,7 @@ export const startExecutionWorkers = async () => {
     "execution_plan",
     "execution.plan",
     (raw) => consumeOnce("planner", raw, plan),
-    { onExhausted: failOnExhausted("planning") },
+    { onExhausted: failOnExhausted("planning"), prefetch: config.executionPlanConcurrency },
   );
   await rabbitMQService.subscribe(
     "execution_run",
