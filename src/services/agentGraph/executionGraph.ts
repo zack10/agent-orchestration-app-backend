@@ -579,6 +579,18 @@ const inspectRepository = async (state: typeof ExecutionGraphState.State) => {
   return { repoContext };
 };
 
+/** Starts the lastError of a run that stopped to ask the ticket's author a question. */
+export const NEEDS_ANSWER = "The agent needs an answer before changing anything: ";
+
+export const triageDecision = (parsed: Record<string, unknown>) => {
+  const reason = String(parsed.reason ?? "No reason given.");
+  const question = typeof parsed.question === "string" ? parsed.question.trim() : "";
+  // An "ask" without a question has nothing to show the author, so it proceeds.
+  const decision =
+    parsed.decision === "decline" ? "decline" : parsed.decision === "ask" && question ? "ask" : "proceed";
+  return { decision, reason, question } as const;
+};
+
 /**
  * Whether the ticket should be done at all, asked apart from how: an agent
  * already planning tends to build something even for a ticket it cannot do.
@@ -593,17 +605,18 @@ const triageTicket = async (state: typeof ExecutionGraphState.State) => {
     environment: state.environment ?? "Unknown.",
     repoContext: state.repoContext.summary,
   });
-  const parsed = parseJsonRecord(await askAgent(state, prompt));
-  const declined = parsed.decision === "decline";
-  const reason = String(parsed.reason ?? "No reason given.");
+  const { decision, reason, question } = triageDecision(parseJsonRecord(await askAgent(state, prompt)));
   await graphEvent(state.executionId, "GRAPH_TICKET_TRIAGED", {
-    decision: declined ? "decline" : "proceed",
+    decision,
     reason,
+    ...(decision === "ask" && { question }),
     promptVersion: prompt.version,
   });
-  return declined
-    ? { lastFailure: `The agent declined the ticket: ${reason}`, route: "blocked" as const }
-    : { route: "proceed" as const };
+  if (decision === "decline")
+    return { lastFailure: `The agent declined the ticket: ${reason}`, route: "blocked" as const };
+  if (decision === "ask")
+    return { lastFailure: `${NEEDS_ANSWER}${question}`, route: "blocked" as const };
+  return { route: "proceed" as const };
 };
 
 const planChange = async (state: typeof ExecutionGraphState.State) => {

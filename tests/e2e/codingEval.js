@@ -45,6 +45,8 @@ const DEFAULT_SUITE = "node";
 const PLAN_TIMEOUT_MS = envInt("E2E_PLAN_TIMEOUT_MS", 120_000);
 const RUN_TIMEOUT_MS = envInt("E2E_RUN_TIMEOUT_MS", 1_200_000);
 const RUN_END_STATES = ["AWAITING_PUBLISH_APPROVAL", "BLOCKED", "FAILED", "CANCELED"];
+// Same text as NEEDS_ANSWER in executionGraph.ts; the eval talks to the API, not dist/.
+const NEEDS_ANSWER = "The agent needs an answer before changing anything: ";
 const REPORT_DIR = path.resolve(__dirname, "..", "..", "docs", "testing");
 
 const OUTCOMES = {
@@ -235,7 +237,10 @@ const runScenario = async (fixtures, scenario, runNumber) => {
       // The approver was warned, so it is not a silent wrong fix.
       if (objected && result.outcome === "wrong_fix_shipped") result.outcome = "wrong_fix_flagged";
     } else if (execution.status === "BLOCKED") {
-      result.outcome = scenario.expect === "blocked" ? "correctly_blocked" : "no_fix";
+      // An "ask" scenario passes when the agent stopped to ask (or with a correct fix, graded above).
+      const asked = (execution.lastError ?? "").startsWith(NEEDS_ANSWER);
+      result.outcome =
+        scenario.expect === "blocked" || (scenario.expect === "ask" && asked) ? "correctly_blocked" : "no_fix";
       result.note = (execution.lastError ?? "").replace(/\s+/g, " ").slice(0, 200);
     } else {
       result.note = `${execution.status}: ${(execution.lastError ?? "").replace(/\s+/g, " ").slice(0, 200)}`;

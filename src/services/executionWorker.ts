@@ -11,7 +11,7 @@ import {
 } from "../integrations/githubApp";
 import { commentOnWorkItem } from "./ingestionService";
 import { NonRetryableError, describeError } from "../utils/safeError";
-import { discardExecutionRun, runExecutionGraph } from "./agentGraph/executionGraph";
+import { NEEDS_ANSWER, discardExecutionRun, runExecutionGraph } from "./agentGraph/executionGraph";
 import { hashSnapshot, submitPlan } from "./executionService";
 import rabbitMQService from "./rabbitMQService";
 import { describeFailingBefore, describeReviewObjections, describeVerification, publishApprovedDiff } from "./workspaceService";
@@ -195,12 +195,15 @@ const run = async (executionId: string) => {
   });
   const execution = await prisma.execution.findUnique({
     where: { id: executionId },
-    select: { status: true },
+    select: { status: true, lastError: true },
   });
   if (execution?.status === "BLOCKED") {
+    const reason = execution.lastError ?? "";
     await notifyTracker(
       executionId,
-      `Execution ${executionId} is blocked after verification failures. Review the execution evidence.`,
+      reason.startsWith(NEEDS_ANSWER)
+        ? `${reason.slice(NEEDS_ANSWER.length)}\n\nAnswer by editing this ticket's description: the edit starts a new execution. (Execution ${executionId} stopped before changing any code.)`
+        : `Execution ${executionId} is blocked: ${reason.slice(0, 1500) || "see the execution evidence"}`,
     );
   }
   if (execution?.status === "AWAITING_PUBLISH_APPROVAL") {

@@ -33,7 +33,7 @@ test("every suite has a language, an environment and at least 3 valid scenarios"
     const clean = cleanFiles(suite);
     for (const scenario of own) {
       assert.ok(scenario.title && scenario.description, `${scenario.id}: title and description`);
-      assert.ok(["fix", "blocked"].includes(scenario.expect), `${scenario.id}: expect is fix or blocked`);
+      assert.ok(["fix", "ask", "blocked"].includes(scenario.expect), `${scenario.id}: expect is fix, ask or blocked`);
       for (const file of scenario.expectedFiles)
         assert.ok(clean.has(file), `${scenario.id}: expected file ${file} exists in the clean repo`);
       for (const file of scenario.bugFiles.keys()) {
@@ -44,7 +44,7 @@ test("every suite has a language, an environment and at least 3 valid scenarios"
         assert.ok(isTestFile(suite, file), `${scenario.id}: hidden file ${file} is a test file`);
         assert.ok(!clean.has(file), `${scenario.id}: hidden file ${file} does not replace a project file`);
       }
-      if (scenario.expect === "fix") {
+      if (scenario.expect !== "blocked") {
         assert.ok(scenario.hiddenFiles.size > 0, `${scenario.id}: has a hidden test`);
         assert.ok(scenario.bugFiles.size > 0, `${scenario.id}: plants a bug`);
       } else {
@@ -64,7 +64,7 @@ for (const suite of suites)
     assert.ok(result.hiddenPassed, result.hiddenOutput);
   });
 
-for (const scenario of scenarios.filter((candidate) => candidate.expect === "fix"))
+for (const scenario of scenarios.filter((candidate) => candidate.expect !== "blocked"))
   test(`${scenario.id}: the bug passes the project's tests but fails the hidden test`, needsDocker, async () => {
     const result = await grade(scenario.suite, scenarioFiles(scenario), scenario.hiddenFiles);
     assert.ok(result.visiblePassed, `visible tests should not catch the bug:\n${result.visibleOutput}`);

@@ -7,7 +7,7 @@ import path from "node:path";
  * tied to the exact prompts that produced it. Never edit a released version.
  */
 export const EXECUTION_PROMPTS = {
-  triage: "triage.v1",
+  triage: "triage.v2",
   plan: "plan.v4",
   implement: "implement.v2",
   agent: "agent.v6",
