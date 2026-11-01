@@ -31,7 +31,7 @@ export const formatPlanComment = (plan: AgentPlan, version: number) =>
       ? ["**I'm not sure about this; if you meant something else, say so:**", ...plan.questions.map((question) => `- ${question}`)].join("\n")
       : "",
     plan.filesToEdit.length ? `**Files I expect to change:** ${plan.filesToEdit.join(", ")}` : "",
-    plan.testStrategy.length ? `**How I'll check it:** ${plan.testStrategy.join("; ")}` : "",
+    plan.testStrategy.length ? ["**How I'll check it:**", ...plan.testStrategy.map((step) => `- ${step}`)].join("\n") : "",
     COMMANDS,
   ]
     .filter(Boolean)
@@ -57,6 +57,8 @@ export type ReplyAction =
   | { kind: "hint" };
 
 const COMMAND = /^\/(approve|reject)\b\s*([\s\S]*)$/i;
+// A reply starting like a command (`/aprove`), not a path such as `/api/users`.
+const UNKNOWN_COMMAND = /^\/[a-z]+(\s|$)/i;
 
 /** Who may decide: a tracker user id or name from the connection's `approvers`. */
 export const isApprover = (comment: Pick<TrackerComment, "authorId" | "authorName">, approvers: string[]) => {
@@ -78,7 +80,9 @@ export const replyAction = (comment: TrackerComment, approvers: string[], type: 
     const rest = command[2].trim() || undefined;
     return command[1].toLowerCase() === "approve" ? { kind: "approve", note: rest } : { kind: "reject", reason: rest };
   }
-  return type === "PLAN" ? { kind: "revise", feedback: text } : { kind: "hint" };
+  // A mistyped command gets a hint instead of costing a revised plan.
+  if (UNKNOWN_COMMAND.test(text) || type !== "PLAN") return { kind: "hint" };
+  return { kind: "revise", feedback: text };
 };
 
 const strings = (value: unknown) =>
@@ -124,7 +128,7 @@ export const handleTicketReplies = async (adapter: IssueTrackerAdapter, trackerC
           continue;
         }
         if (action.kind === "hint") {
-          await say("To decide on this change, reply `/approve` or `/reject <reason>`.");
+          await say(approval.type === "PLAN" ? `I didn't act on that. ${COMMANDS}` : "To decide on this change, reply `/approve` or `/reject <reason>`.");
           continue;
         }
         const actor = `${adapter.externalSystem.toLowerCase()}:${comment.authorName}`;

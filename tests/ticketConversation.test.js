@@ -21,7 +21,7 @@ test("only an approver's /approve approves", () => {
   assert.deepEqual(replyAction(reply("/reject not now"), approvers, "PLAN"), { kind: "reject", reason: "not now" });
   assert.equal(replyAction(reply("/approve", "mallory"), approvers, "PLAN").kind, "unauthorized");
   assert.equal(replyAction(reply("looks good, approve"), approvers, "PLAN").kind, "revise", "free text never approves");
-  assert.equal(replyAction(reply("/approved"), approvers, "PLAN").kind, "revise", "a command is a whole word");
+  assert.equal(replyAction(reply("/approved"), approvers, "PLAN").kind, "hint", "a command is a whole word; a near miss gets a hint");
 });
 
 test("on a plan other text is feedback; on a change it gets a hint", () => {
@@ -30,6 +30,8 @@ test("on a plan other text is feedback; on a change it gets a hint", () => {
     feedback: "No, wait until Tuesday 02:00",
   });
   assert.equal(replyAction(reply("hmm"), approvers, "PUBLISH").kind, "hint");
+  assert.equal(replyAction(reply("/aprove"), approvers, "PLAN").kind, "hint", "a mistyped command does not cost a revision");
+  assert.equal(replyAction(reply("/api/users should return 404"), approvers, "PLAN").kind, "revise", "a path is feedback");
 });
 
 test("the agent's own comments and empty ones are never replies", () => {
@@ -54,13 +56,14 @@ test("the plan comment shows the reading, the doubts and how to answer", () => {
       questions: ["if you meant one catch-up run: Monday 09:00"],
       filesToEdit: ["schedule/schedule.go"],
       risk: "low",
-      testStrategy: ["test"],
+      testStrategy: ["go test ./...", "new test for missed runs"],
     },
     2,
   );
   assert.match(text, /\*\*Plan \(version 2\):\*\* Skip missed nights\./);
   assert.match(text, /- back Monday 09:00 -> next run Tuesday 02:00/);
   assert.match(text, /not sure[\s\S]*- if you meant one catch-up run/);
+  assert.match(text, /How I'll check it:\*\*\n- go test \.\/\.\.\.\n- new test for missed runs/);
   assert.match(text, /`\/approve`[\s\S]*`\/reject <reason>`[\s\S]*revise the plan/);
   assert.doesNotMatch(formatPlanComment({ summary: "s", expectedBehaviour: [], questions: [], filesToEdit: [], risk: "low", testStrategy: [] }, 1), /not sure|version/);
   assert.match(formatPublishComment(["a.go"], "Checks passed: test."), /Changed:\*\* a\.go[\s\S]*Checks passed[\s\S]*draft pull request/);
