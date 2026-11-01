@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { config } from "../config";
-import { SANDBOX_ROOT, Toolchain, commandText } from "./toolchain";
+import { SANDBOX_ROOT, ServiceContainer, Toolchain, commandText } from "./toolchain";
 
 const exec = promisify(execFile);
 const safeId = (id: string) => {
@@ -25,6 +25,7 @@ export const createWorkspace = async (id: string) => {
 export const removeWorkspace = async (id: string) => {
   const root = workspacePath(id);
   await removeEnvironmentSnapshot(id);
+  await removeServices(id);
   try {
     await fs.rm(root, { recursive: true, force: true });
   } catch (error) {
@@ -77,13 +78,13 @@ const dockerArgs = (
   network: boolean,
   withToken: boolean,
   command: string[],
-  options: { image?: string; env?: Record<string, string> } = {},
+  options: { image?: string; env?: Record<string, string>; services?: string } = {},
 ) => [
   "run",
   "--rm",
   ...LIMIT_ARGS,
   "--network",
-  network ? "bridge" : "none",
+  network ? "bridge" : (options.services ?? "none"),
   // `-e NAME` without a value makes docker read it from our process env.
   ...(withToken ? ["-e", "GITHUB_TOKEN"] : []),
   ...envArgs(options.env),
@@ -233,6 +234,65 @@ export class SetupFailedError extends Error {
   name = "SetupFailedError";
 }
 
+/**
+ * The toolchain's service containers (a database, a cache) for one run, on
+ * an internal Docker network: the run's containers reach them by name, and
+ * nothing on it reaches the internet. Started when a container that needs
+ * them starts (setup, the sandbox, verification), so a resumed run gets them
+ * back; removed with the workspace. Returns the network, or undefined when
+ * the toolchain has no services.
+ */
+const servicesNetwork = (id: string) => `agent-net-${safeId(id).toLowerCase()}`;
+const serviceContainer = (id: string, name: string) => `agent-svc-${safeId(id).toLowerCase()}-${name}`;
+const SERVICES_LABEL = "agent.services";
+
+export const startServices = async (id: string, toolchain: Toolchain) => {
+  if (!toolchain.services?.length) return undefined;
+  const network = servicesNetwork(id);
+  const label = ["--label", `${SERVICES_LABEL}=${safeId(id)}`];
+  const exists = await exec("docker", ["network", "inspect", network]).then(() => true, () => false);
+  if (!exists) await execDocker(["network", "create", "--internal", ...label, network]);
+  for (const service of toolchain.services) {
+    const name = serviceContainer(id, service.name);
+    const running = await exec("docker", ["inspect", "--format", "{{.State.Running}}", name]).then(
+      (result) => result.stdout.trim() === "true",
+      () => false,
+    );
+    if (running) continue;
+    await exec("docker", ["rm", "-f", "-v", name]).catch(() => undefined);
+    // The daemon pulls the image, so the internal network does not stop that.
+    await execDocker(
+      ["run", "-d", "--name", name, ...label, ...LIMIT_ARGS, "--network", network, "--network-alias", service.name, ...envArgs(service.env), service.image],
+      undefined,
+      SETUP_TIMEOUT_MS,
+    );
+    if (service.ready) await waitUntilReady(name, service);
+  }
+  return network;
+};
+
+const waitUntilReady = async (container: string, service: ServiceContainer) => {
+  const seconds = service.readyTimeoutSeconds ?? 120;
+  const deadline = Date.now() + seconds * 1000;
+  for (;;)
+    try {
+      await exec("docker", ["exec", container, ...service.ready!], { timeout: 30_000 });
+      return;
+    } catch (error) {
+      if (Date.now() > deadline)
+        throw new Error(`service "${service.name}" was not ready after ${seconds}s: ${dockerFailure(error).message}`);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+};
+
+export const removeServices = async (id: string) => {
+  const { stdout } = await exec("docker", ["ps", "-aq", "--filter", `label=${SERVICES_LABEL}=${safeId(id)}`]).catch(() => ({ stdout: "" }));
+  const containers = stdout.split(/\s+/).filter(Boolean);
+  // -v: database images declare volumes, which would otherwise pile up.
+  if (containers.length) await exec("docker", ["rm", "-f", "-v", ...containers]).catch(() => undefined);
+  await exec("docker", ["network", "rm", servicesNetwork(id)]).catch(() => undefined);
+};
+
 /** How a check did on the unmodified code, during setup. */
 export interface BaselineResult {
   check: string;
@@ -286,7 +346,10 @@ export const setupWorkspace = async (
     execDocker(["exec", setupContainer(id), ...command], undefined, options.setupTimeoutMs ?? SETUP_TIMEOUT_MS);
   try {
     try {
+      const services = await startServices(id, toolchain);
       await execDocker(args);
+      // Setup keeps the bridge for package registries and joins the services' network too.
+      if (services) await execDocker(["network", "connect", services, setupContainer(id)]);
       if (toolchain.setup) await run(toolchain.setup);
     } catch (error) {
       throw new SetupFailedError((error as Error).message);
@@ -523,7 +586,7 @@ export interface CheckResult {
 }
 
 /**
- * Runs the toolchain's checks in its image, without network, stopping at
+ * Runs the toolchain's checks in its image, without internet (only its services), stopping at
  * the first failure. A check in `failingBefore` failed on the unmodified
  * code, so failing again doesn't block: established agents report a test
  * that was already broken instead of refusing the change, and a person
@@ -544,6 +607,7 @@ export const verifyWorkspace = async (
     output: `No "${script}" check is configured for this repository.`,
   }));
   let failed = false;
+  const services = checks.run.length ? await startServices(id, toolchain) : undefined;
   for (const { name, command } of checks.run)
     try {
       const result = await keepOutputOutOfDiffs(id, () =>
@@ -551,6 +615,7 @@ export const verifyWorkspace = async (
           dockerArgs(workspacePath(id), false, false, command, {
             image: toolchain.image,
             env: toolchain.env,
+            services,
           }),
         ),
       );
@@ -627,13 +692,14 @@ export const describeVerification = (verification: unknown) => {
 /**
  * Long-lived sandbox for one run: started once, then each command is a
  * `docker exec`, instead of a new container per command. Same limits as
- * every other workspace container, and never any network.
+ * every other workspace container; no internet, only the run's services.
  */
 const sandboxName = (id: string) => `agent-sandbox-${safeId(id)}`;
 
 export const startSandbox = async (id: string, toolchain: Toolchain) => {
   // A crashed earlier attempt may have left one behind.
   await stopSandbox(id);
+  const services = await startServices(id, toolchain);
   await execDocker([
     "run",
     "-d",
@@ -641,7 +707,7 @@ export const startSandbox = async (id: string, toolchain: Toolchain) => {
     sandboxName(id),
     ...LIMIT_ARGS,
     "--network",
-    "none",
+    services ?? "none",
     // `docker exec` inherits these, so every command sees the toolchain's caches.
     ...envArgs(toolchain.env),
     ...workspaceMounts(workspacePath(id), false),

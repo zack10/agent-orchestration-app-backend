@@ -59,6 +59,7 @@ export interface FixedEnvironment {
   image?: string;
   setup?: string[] | null;
   env?: Record<string, string>;
+  services?: Toolchain["services"];
 }
 
 export const hashProposal = (proposal: EnvironmentProposal) =>

@@ -53,6 +53,17 @@ const command = z.array(z.string().min(1).max(1000)).min(1).max(100);
 // so it cannot be read as a docker option.
 const IMAGE_PATTERN = /^[a-z0-9]+([._/:@-][a-zA-Z0-9]+)*$/;
 const image = z.string().regex(IMAGE_PATTERN, "invalid image reference").max(255);
+const env = z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string().max(1000));
+const service = z
+  .object({
+    // Part of a container name and a hostname.
+    name: z.string().regex(/^[a-z][a-z0-9-]{0,30}$/, "lowercase letters, digits and dashes"),
+    image,
+    env: env.optional(),
+    ready: command.optional(),
+    readyTimeoutSeconds: z.number().int().min(1).max(600).optional(),
+  })
+  .strict();
 
 /** Validates a repository's configuration; used by the API and again when a run starts. */
 export const verificationConfigSchema = z
@@ -64,9 +75,14 @@ export const verificationConfigSchema = z
         image: image.optional(),
         setup: command.nullable().optional(),
         checks: z.record(z.string().regex(/^[a-zA-Z0-9:_-]+$/), command).optional(),
-        env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string().max(1000)).optional(),
+        env: env.optional(),
         testFilePatterns: z.array(z.string().min(1).max(200).refine(isRegExp, "invalid regular expression")).optional(),
         protectedPaths: z.array(z.string().min(1).max(500)).optional(),
+        services: z
+          .array(service)
+          .max(5)
+          .refine((services) => new Set(services.map((s) => s.name)).size === services.length, "service names must be unique")
+          .optional(),
       })
       .strict()
       .optional(),
@@ -117,6 +133,7 @@ export const resolveToolchain = (read: ReadRepoFile, rawConfig: unknown): Toolch
     env: { ...(devcontainer?.env ?? {}), ...(configured.env ?? {}) },
     testFilePatterns: configured.testFilePatterns ?? DEFAULT_TEST_FILE_PATTERNS,
     protectedPaths: configured.protectedPaths ?? DEFAULT_PROTECTED_PATHS,
+    ...(configured.services?.length ? { services: configured.services } : {}),
   };
   if (!Object.keys(toolchain.checks).length)
     notes.push("no checks are configured for this repository, so changes cannot be verified");
@@ -156,6 +173,11 @@ export const describeEnvironment = (
   [
     ...(toolchain.language ? [`Language: ${toolchain.language}`] : []),
     `Image: ${toolchain.image}`,
+    ...(toolchain.services?.length
+      ? [
+          `Services, reachable by name from setup, checks and commands: ${toolchain.services.map((s) => `${s.name} (${s.image})`).join(", ")}`,
+        ]
+      : []),
     checks.length
       ? `Checks:\n${checks.map((check) => `- ${check.name}: ${commandText(check.command)}`).join("\n")}`
       : `Checks: none are configured for this repository.${
@@ -173,5 +195,6 @@ export const describeEnvironment = (
 /** A one-line description for prompts and events. */
 export const describeToolchain = (toolchain: Toolchain) => {
   const checks = Object.keys(toolchain.checks);
-  return `${toolchain.language ? `${toolchain.language}; ` : ""}image ${toolchain.image}; checks: ${checks.length ? checks.join(", ") : "none available"}`;
+  const services = toolchain.services?.map((s) => s.name) ?? [];
+  return `${toolchain.language ? `${toolchain.language}; ` : ""}image ${toolchain.image}; checks: ${checks.length ? checks.join(", ") : "none available"}${services.length ? `; services: ${services.join(", ")}` : ""}`;
 };

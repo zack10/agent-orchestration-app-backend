@@ -304,6 +304,10 @@ const describeFixed = (fixed: FixedEnvironment) =>
     ...(fixed.image ? [`Image: ${fixed.image}`] : []),
     ...(fixed.setup ? [`Setup: ${fixed.setup.join(" ")}`] : []),
     ...Object.entries(fixed.env ?? {}).map(([name, value]) => `Env: ${name}=${value}`),
+    ...(fixed.services ?? []).map(
+      (service) =>
+        `Service: host "${service.name}", image ${service.image}${Object.keys(service.env ?? {}).length ? `, env ${Object.entries(service.env!).map(([name, value]) => `${name}=${value}`).join(" ")}` : ""}`,
+    ),
   ].join("\n") || "Nothing.";
 
 /**
@@ -338,6 +342,7 @@ const prepareEnvironment = async (
     image: resolution.toolchain.image,
     ...(resolution.toolchain.setup !== null ? { setup: resolution.toolchain.setup } : {}),
     ...(Object.keys(resolution.toolchain.env).length ? { env: resolution.toolchain.env } : {}),
+    ...(resolution.toolchain.services ? { services: resolution.toolchain.services } : {}),
   };
   const stored = repository.environmentProposal as unknown as StoredProposal | null;
   const files = discoveryFiles(fsRepoFiles(workspacePath(executionId)), await trackedFiles(executionId));

@@ -118,6 +118,9 @@ test("invalid configuration is rejected as non-retryable", () => {
   rejects({ toolchain: { env: { "has-dash": "x" } } }, /toolchain\.env/);
   rejects({ toolchain: { preset: "node" } }, /Unrecognized key/);
   rejects({ unknown: true }, /Unrecognized key/);
+  rejects({ toolchain: { services: [{ name: "DB", image: "postgres:16" }] } }, /toolchain\.services\.0\.name/);
+  rejects({ toolchain: { services: [{ name: "db", image: "--privileged" }] } }, /invalid image reference/);
+  rejects({ toolchain: { services: [{ name: "db", image: "a:1" }, { name: "db", image: "b:1" }] } }, /service names must be unique/);
   assert.deepEqual(parseVerificationConfig(null), {}, "no configuration is valid");
 });
 
@@ -143,6 +146,11 @@ test("the agent is told the image and each check's command, or how to find them"
     describeEnvironment(toolchain, selectChecks(toolchain, {}).run, true, ["test"]),
     /\nAlready failing before your change, on the unmodified code: test\. A failure there is not caused by you/,
   );
+  const services = [{ name: "db", image: "postgres:16", env: { POSTGRES_PASSWORD: "test" }, ready: ["pg_isready"] }];
+  const withDb = resolve({}, { toolchain: { services } }).toolchain;
+  assert.deepEqual(withDb.services, services);
+  assert.match(describeEnvironment(withDb, [], true), /\nServices, reachable by name from setup, checks and commands: db \(postgres:16\)\n/);
+  assert.equal(resolve({}).toolchain.services, undefined, "no services unless configured");
 });
 
 test("the PR body says which checks ran, and when none did", () => {
@@ -221,6 +229,58 @@ test("verification does not block on a check that already failed before the chan
   const broken = await verifyWorkspace(id, toolchain, { run: [check("lint", "exit 2"), check("test", "true")], unavailable: [] }, ["test"]);
   assert.equal(broken.passed, false, "a check that passed before still blocks");
   assert.deepEqual(broken.results.map((result) => result.script), ["lint"]);
+});
+
+test("checks reach the run's services by name, and nothing else", { skip: require("node:child_process").spawnSync("docker", ["version"]).status === 0 ? false : "Docker is not available" }, async (t) => {
+  const fs = require("node:fs");
+  const { execFileSync } = require("node:child_process");
+  const {
+    execInSandbox,
+    removeEnvironmentSnapshot,
+    removeServices,
+    setupWorkspace,
+    startSandbox,
+    stopSandbox,
+    verifyWorkspace,
+    workspacePath,
+  } = require("../dist/services/workspaceService");
+  const id = `services-test-${process.pid}`;
+  const dir = workspacePath(id);
+  fs.mkdirSync(dir, { recursive: true });
+  t.after(async () => {
+    await removeServices(id);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  const toolchain = {
+    image: "node:20-bookworm",
+    env: {},
+    services: [{ name: "web", image: "nginx:1.27-alpine", ready: ["wget", "-q", "-O", "/dev/null", "http://localhost"] }],
+  };
+  const check = (name, script) => ({ name, command: ["sh", "-c", script] });
+
+  const result = await verifyWorkspace(id, toolchain, {
+    run: [check("service", "curl -sf -m 10 http://web >/dev/null"), check("internet", "! curl -sf -m 5 https://example.com >/dev/null")],
+    unavailable: [],
+  });
+  assert.equal(result.passed, true, result.results.map((r) => r.output).join("\n"));
+
+  // Setup (on the bridge too, for package registries) and the agent's sandbox reach it the same way.
+  const setup = await setupWorkspace(id, { ...toolchain, setup: null }, [check("service", "curl -sf -m 10 http://web >/dev/null")]);
+  assert.deepEqual(setup.baseline.map(({ check, passed }) => ({ check, passed })), [{ check: "service", passed: true }]);
+  await startSandbox(id, toolchain);
+  try {
+    assert.equal((await execInSandbox(id, ["curl", "-sf", "-m", "10", "http://web"], 30_000)).exitCode, 0);
+    assert.notEqual((await execInSandbox(id, ["curl", "-sf", "-m", "5", "https://example.com"], 30_000)).exitCode, 0);
+  } finally {
+    await stopSandbox(id);
+  }
+
+  await removeEnvironmentSnapshot(id);
+  await removeServices(id);
+  const left = execFileSync("docker", ["ps", "-aq", "--filter", `label=agent.services=${id}`], { encoding: "utf8" }).trim();
+  assert.equal(left, "", "service containers are removed");
+  assert.notEqual(require("node:child_process").spawnSync("docker", ["network", "inspect", `agent-net-${id}`]).status, 0, "the network is removed");
 });
 
 test("environment snapshots are cached per repository and per environment", () => {

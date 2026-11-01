@@ -20,6 +20,24 @@ export interface Toolchain {
   testFilePatterns: string[];
   /** Files the agent may not change (CI config, manifests, lockfiles). */
   protectedPaths: string[];
+  /** Containers the checks need (a database, a cache), started beside each run's sandbox. */
+  services?: ServiceContainer[];
+}
+
+/**
+ * A container beside the sandbox, on a network shared only with that run's
+ * containers and without internet. Setup, checks and the agent's commands
+ * reach it by `name`.
+ */
+export interface ServiceContainer {
+  /** Hostname it is reached by, e.g. "db". */
+  name: string;
+  image: string;
+  env?: Record<string, string>;
+  /** Run inside the service until it succeeds (e.g. `pg_isready`); without it, started counts as ready. */
+  ready?: string[];
+  /** How long `ready` may take to succeed; default 120. */
+  readyTimeoutSeconds?: number;
 }
 
 export type ToolchainSource = "configured" | "devcontainer" | "default";
