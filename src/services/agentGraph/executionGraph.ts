@@ -620,6 +620,7 @@ const planChange = async (state: typeof ExecutionGraphState.State) => {
   const internalPlan = JSON.stringify(
     {
       summary: parsed.summary ?? "Implement the ticket with minimal changes.",
+      expectedBehaviour: parsed.expectedBehaviour ?? [],
       filesToEdit: parsed.filesToEdit ?? state.repoContext.selectedFiles,
       risk: parsed.risk ?? "unknown",
       testStrategy: parsed.testStrategy ?? state.repoContext.checks,

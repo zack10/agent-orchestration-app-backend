@@ -8,12 +8,12 @@ import path from "node:path";
  */
 export const EXECUTION_PROMPTS = {
   triage: "triage.v1",
-  plan: "plan.v3",
+  plan: "plan.v4",
   implement: "implement.v2",
   agent: "agent.v6",
   analyze: "analyze.v2",
   review: "review.v6",
-  reviewer: "reviewer.v3",
+  reviewer: "reviewer.v5",
   discover: "discover.v3",
   fileFormat: "file-format.v1",
 } as const;
