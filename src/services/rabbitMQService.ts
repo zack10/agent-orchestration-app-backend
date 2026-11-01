@@ -19,6 +19,8 @@ export interface SubscribeOptions {
   /** Total deliveries before the message is dead-lettered. */
   maxAttempts?: number;
   retryDelayMs?: number;
+  /** Messages this consumer handles at once (default 1). */
+  prefetch?: number;
   /** Called once when a message is dead-lettered (retries exhausted or non-retryable). */
   onExhausted?: (message: unknown, error: unknown) => Promise<void>;
 }
@@ -231,7 +233,7 @@ class RabbitMQService {
       },
     });
     await channel.assertQueue(deadQueue, { durable: true });
-    await channel.prefetch(1);
+    await channel.prefetch(subscription.prefetch ?? 1);
 
     await channel.consume(queueName, async (msg: ConsumeMessage | null) => {
       if (!msg) return;

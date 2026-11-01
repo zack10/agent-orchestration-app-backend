@@ -392,7 +392,7 @@ export const startExecutionWorkers = async () => {
     "execution_run",
     "execution.run",
     (raw) => consumeOnce("runner", raw, run),
-    { onExhausted: failOnExhausted("run") },
+    { onExhausted: failOnExhausted("run"), prefetch: config.executionRunConcurrency },
   );
   await rabbitMQService.subscribe(
     "execution_publish",

@@ -64,6 +64,8 @@ export const config = {
   taskRetryDelayMs: parsePositiveInt(process.env.TASK_RETRY_DELAY_MS, 5000),
   taskLeaseMs: parsePositiveInt(process.env.TASK_LEASE_MS, 300_000),
   executionLeaseMs: parsePositiveInt(process.env.EXECUTION_LEASE_MS, 300_000),
+  // Run steps (agent loop, checks, review) one server works on at once.
+  executionRunConcurrency: parsePositiveInt(process.env.EXECUTION_RUN_CONCURRENCY, 1),
   consumerMaxAttempts: parsePositiveInt(process.env.CONSUMER_MAX_ATTEMPTS, 3),
   consumerRetryDelayMs: parsePositiveInt(
     process.env.CONSUMER_RETRY_DELAY_MS,

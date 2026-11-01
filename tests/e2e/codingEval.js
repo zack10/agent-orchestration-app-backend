@@ -4,6 +4,7 @@
 //   npm run eval:coding -- --scenario python  one suite (node, python, go)
 //   npm run eval:coding -- --scenario node/01,go   by id or prefix ("01" is 01 of every suite)
 //   npm run eval:coding -- --runs 3           runs per scenario
+//   npm run eval:coding -- --parallel 4       4 runs at once, one sandbox repo each (E2E_GITHUB_EXTRA_REPOS)
 //   npm run eval:coding -- --check            check the setup without any LLM calls
 //
 // For each run: point the sandbox repo's main at the scenario's code -> create
@@ -14,6 +15,10 @@
 //
 // Needs everything the execution e2e suite needs plus E2E_GITHUB_TOKEN with
 // Contents read/write on the sandbox repo. It REWRITES that repo's main branch.
+// With --parallel N, runs share out over E2E_GITHUB_REPO and the first N-1 of
+// E2E_GITHUB_EXTRA_REPOS (comma-separated, same owner and GitHub App), each with
+// its own card label, so the token needs those too; the server runs that many
+// executions at once only with EXECUTION_RUN_CONCURRENCY set to at least N.
 //
 // Each suite (a project in one language) runs with its own environment from
 // suite.json, set on the sandbox repository first.
@@ -59,35 +64,37 @@ const OUTCOMES = {
 };
 
 const parseArgs = (argv) => {
-  const options = { scenarios: null, runs: envInt("E2E_EVAL_RUNS", 1), check: false };
+  const options = { scenarios: null, runs: envInt("E2E_EVAL_RUNS", 1), parallel: 1, check: false };
   for (let index = 0; index < argv.length; index += 1) {
     const [flag, inline] = argv[index].split("=");
     const value = () => inline ?? argv[++index];
     if (flag === "--check") options.check = true;
     else if (flag === "--scenario") options.scenarios = value().split(",").map((id) => id.trim());
     else if (flag === "--runs") options.runs = Number.parseInt(value(), 10);
+    else if (flag === "--parallel") options.parallel = Number.parseInt(value(), 10);
     else throw new Error(`Unknown argument ${argv[index]}`);
   }
   if (!(options.runs >= 1)) throw new Error("--runs must be a positive number");
+  if (!(options.parallel >= 1)) throw new Error("--parallel must be a positive number");
   return options;
 };
 
 const log = (message) => console.log(`[eval ${new Date().toISOString().slice(11, 19)}] ${message}`);
 
 /** Replaces the whole tree of the sandbox repo's default branch with `files`. */
-const setDefaultBranch = async (files, message) => {
+const setDefaultBranch = async (files, message, repo) => {
   const branch = env("E2E_GITHUB_DEFAULT_BRANCH", "main");
-  const ref = await github("GET", `${repoPath()}/git/ref/heads/${branch}`);
+  const ref = await github("GET", `${repoPath(repo)}/git/ref/heads/${branch}`);
   // No base_tree: files that are not listed are removed.
-  const tree = await github("POST", `${repoPath()}/git/trees`, {
+  const tree = await github("POST", `${repoPath(repo)}/git/trees`, {
     tree: [...files].map(([file, content]) => ({ path: file, mode: "100644", type: "blob", content })),
   });
-  const commit = await github("POST", `${repoPath()}/git/commits`, {
+  const commit = await github("POST", `${repoPath(repo)}/git/commits`, {
     message,
     tree: tree.sha,
     parents: [ref.object.sha],
   });
-  await github("PATCH", `${repoPath()}/git/refs/heads/${branch}`, { sha: commit.sha });
+  await github("PATCH", `${repoPath(repo)}/git/refs/heads/${branch}`, { sha: commit.sha });
   return commit.sha;
 };
 
@@ -95,22 +102,24 @@ const setDefaultBranch = async (files, message) => {
  * Setup check without LLM calls: creating a tree and a commit proves the
  * token can write Contents, but no branch is moved.
  */
-const checkSetup = async () => {
+const checkSetup = async (slots) => {
   const branch = env("E2E_GITHUB_DEFAULT_BRANCH", "main");
-  const ref = await github("GET", `${repoPath()}/git/ref/heads/${branch}`);
-  const tree = await github("POST", `${repoPath()}/git/trees`, {
-    tree: [{ path: "README.md", mode: "100644", type: "blob", content: "setup check\n" }],
-  });
-  await github("POST", `${repoPath()}/git/commits`, {
-    message: "benchmark: setup check (never referenced)",
-    tree: tree.sha,
-    parents: [ref.object.sha],
-  });
+  for (const { repo } of slots) {
+    const ref = await github("GET", `${repoPath(repo)}/git/ref/heads/${branch}`);
+    const tree = await github("POST", `${repoPath(repo)}/git/trees`, {
+      tree: [{ path: "README.md", mode: "100644", type: "blob", content: "setup check\n" }],
+    });
+    await github("POST", `${repoPath(repo)}/git/commits`, {
+      message: "benchmark: setup check (never referenced)",
+      tree: tree.sha,
+      parents: [ref.object.sha],
+    });
+  }
   for (const suite of loadSuites()) {
     const result = await grade(suite, cleanFiles(suite), new Map());
     if (!result.visiblePassed) throw new Error(`${suite.name}: grading container failed:\n${result.output}`);
   }
-  log(`setup OK: server, Docker grading, Trello fixtures, and write access to ${repoPath()} (${branch} untouched)`);
+  log(`setup OK: server, Docker grading, Trello fixtures, and write access to ${slots.map(({ repo }) => repoPath(repo)).join(", ")} (${branch} untouched)`);
 };
 
 /** Grades an approved diff: the scenario's code with the diff applied, its own tests, then the hidden test. */
@@ -161,8 +170,8 @@ const runScenario = async (fixtures, scenario, runNumber) => {
   let cardId;
   try {
     await useEnvironment(fixtures, suiteEnvironment(scenario.suite));
-    const baseSha = await setDefaultBranch(scenarioFiles(scenario), `benchmark: ${scenario.id} (${id})`);
-    cardId = await createCard(`[${id}] ${scenario.title}`, scenario.description);
+    const baseSha = await setDefaultBranch(scenarioFiles(scenario), `benchmark: ${scenario.id} (${id})`, fixtures.repo);
+    cardId = await createCard(`[${id}] ${scenario.title}`, scenario.description, fixtures.label);
     const workItem = await ingestCard(fixtures, cardId);
     const { data: detail } = await api("GET", `/api/work-items/${workItem.id}`, { expectStatus: 200 });
     result.executionId = detail.executions[0].id;
@@ -403,25 +412,43 @@ const main = async () => {
   await execFileAsync("docker", ["version"]).catch(() => {
     throw new Error("Docker is not available; it is needed to grade diffs.");
   });
-  const fixtures = await ensureFixtures();
-  if (options.check) return checkSetup();
+  // One sandbox repository and card label per parallel slot; the first is the usual one.
+  const repos = [env("E2E_GITHUB_REPO"), ...env("E2E_GITHUB_EXTRA_REPOS", "").split(",").map((repo) => repo.trim()).filter(Boolean)];
+  if (options.parallel > repos.length)
+    throw new Error(`--parallel ${options.parallel} needs ${options.parallel - 1} repositories in E2E_GITHUB_EXTRA_REPOS`);
+  const slots = [];
+  // In turn: each call also refreshes the shared project and agent.
+  for (const [index, repo] of repos.slice(0, options.parallel).entries())
+    slots.push(await ensureFixtures({ repo, label: index ? `${env("E2E_TRELLO_LABEL")}-${index + 1}` : env("E2E_TRELLO_LABEL") }));
+  if (options.check) return checkSetup(slots);
   const { stdout: commit } = await execFileAsync("git", ["rev-parse", "--short", "HEAD"]).catch(() => ({ stdout: "unknown" }));
 
   const started = Date.now();
   log(`${scenarios.length} scenario(s) in ${[...new Set(scenarios.map((scenario) => scenario.suite.name))].join(", ")} x ${options.runs} run(s) with ${env("E2E_LLM_PROVIDER")}/${env("E2E_LLM_MODEL")}`);
-  const results = [];
+  const jobs = scenarios.flatMap((scenario) => Array.from({ length: options.runs }, (_, index) => ({ scenario, run: index + 1 })));
+  const results = new Array(jobs.length);
+  let next = 0;
   try {
-    for (const scenario of scenarios)
-      for (let run = 1; run <= options.runs; run += 1) results.push(await runScenario(fixtures, scenario, run));
+    // Each slot takes the next job when its run ends; results keep the job order.
+    await Promise.all(
+      slots.map(async (fixtures) => {
+        while (next < jobs.length) {
+          const index = next++;
+          results[index] = await runScenario(fixtures, jobs[index].scenario, jobs[index].run);
+        }
+      }),
+    );
   } finally {
-    // Leave the sandbox on the clean project so other suites start from it.
+    // Leave each sandbox on the clean project so other suites start from it.
     const suite = loadSuites().find((candidate) => candidate.name === DEFAULT_SUITE);
-    await setDefaultBranch(cleanFiles(suite), "benchmark: restore clean project").catch((error) =>
-      log(`could not restore ${env("E2E_GITHUB_DEFAULT_BRANCH", "main")}: ${error.message}`),
-    );
-    await useEnvironment(fixtures, suiteEnvironment(suite)).catch((error) =>
-      log(`could not restore the repository's environment: ${error.message}`),
-    );
+    for (const fixtures of slots) {
+      await setDefaultBranch(cleanFiles(suite), "benchmark: restore clean project", fixtures.repo).catch((error) =>
+        log(`could not restore ${fixtures.repo} ${env("E2E_GITHUB_DEFAULT_BRANCH", "main")}: ${error.message}`),
+      );
+      await useEnvironment(fixtures, suiteEnvironment(suite)).catch((error) =>
+        log(`could not restore ${fixtures.repo}'s environment: ${error.message}`),
+      );
+    }
   }
 
   const report = writeReport(results, {

@@ -35,7 +35,27 @@ const github = (method, path, body) =>
     body,
   });
 
-const repoPath = () => `/repos/${env("E2E_GITHUB_OWNER")}/${env("E2E_GITHUB_REPO")}`;
+const repoPath = (repo = env("E2E_GITHUB_REPO")) => `/repos/${env("E2E_GITHUB_OWNER")}/${repo}`;
+
+/** Gives an empty repository its first commit, so the benchmark has a branch to move. */
+const ensureBranch = async (repo) => {
+  const branch = env("E2E_GITHUB_DEFAULT_BRANCH", "main");
+  // An empty repository answers 409 (or 404) for any ref.
+  const exists = await github("GET", `${repoPath(repo)}/git/ref/heads/${branch}`).then(() => true, () => false);
+  if (!exists)
+    await github("PUT", `${repoPath(repo)}/contents/README.md`, {
+      message: "benchmark: first commit",
+      content: Buffer.from("Benchmark sandbox\n").toString("base64"),
+      branch,
+    });
+};
+
+/** Creates a board label unless it exists; parallel benchmark slots each pick up their own. */
+const ensureLabel = async (name) => {
+  const labels = await trello("GET", `/boards/${env("E2E_TRELLO_BOARD_ID")}/labels`);
+  if (!labels.some((label) => label.name.toLowerCase() === name.toLowerCase()))
+    await trello("POST", "/labels", { idBoard: env("E2E_TRELLO_BOARD_ID"), name, color: "sky" });
+};
 
 const getExecution = async (executionId) =>
   (await api("GET", `/api/executions/${executionId}`, { expectStatus: 200 })).data;
@@ -75,8 +95,11 @@ const waitForAnyStatus = (executionId, targets, timeoutMs) =>
     { timeoutMs },
   );
 
-/** Reuses the long-lived e2e project/agent/repository/integration so runs don't pile up rows. */
-const ensureFixtures = async () => {
+/**
+ * Reuses the long-lived e2e project/agent/repository/integration so runs don't pile up rows.
+ * `repo` and `label` pick another sandbox repository and the card label its integration picks up.
+ */
+const ensureFixtures = async ({ repo = env("E2E_GITHUB_REPO"), label = env("E2E_TRELLO_LABEL") } = {}) => {
   const projectName = "e2e-execution-pipeline";
   const { data: projects } = await api("GET", "/api/projects", { expectStatus: 200 });
   const project =
@@ -112,7 +135,9 @@ const ensureFixtures = async () => {
   // Repositories are unique by owner/name, so reuse one if it already exists,
   // updating its environment when it differs.
   const owner = env("E2E_GITHUB_OWNER");
-  const name = env("E2E_GITHUB_REPO");
+  const name = repo;
+  await ensureBranch(repo);
+  if (label !== env("E2E_TRELLO_LABEL")) await ensureLabel(label);
   const { data: repositories } = await api("GET", "/api/repositories", { expectStatus: 200 });
   let existing = repositories.find((candidate) => candidate.owner === owner && candidate.name === name);
   // Keep the updated row: callers compare its environment to decide whether to switch it.
@@ -141,7 +166,7 @@ const ensureFixtures = async () => {
     apiKey: env("E2E_TRELLO_API_KEY"),
     token: env("E2E_TRELLO_TOKEN"),
     boardId: env("E2E_TRELLO_BOARD_ID"),
-    eligibleLabel: env("E2E_TRELLO_LABEL"),
+    eligibleLabel: label,
     repositoryId: repository.id,
   };
   const integrationName = `e2e-trello-${crypto.createHash("sha256").update(JSON.stringify(trelloConfig)).digest("hex").slice(0, 12)}`;
@@ -155,14 +180,14 @@ const ensureFixtures = async () => {
       })
     ).data;
 
-  return { project, repository, integration };
+  return { project, repository, integration, repo, label };
 };
 
 /** Creates a card carrying the eligibility label; returns its id. */
-const createCard = async (name, desc) => {
+const createCard = async (name, desc, labelName = env("E2E_TRELLO_LABEL")) => {
   const labels = await trello("GET", `/boards/${env("E2E_TRELLO_BOARD_ID")}/labels`);
-  const label = labels.find((candidate) => candidate.name.toLowerCase() === env("E2E_TRELLO_LABEL").toLowerCase());
-  assert.ok(label, `label "${env("E2E_TRELLO_LABEL")}" does not exist on the board`);
+  const label = labels.find((candidate) => candidate.name.toLowerCase() === labelName.toLowerCase());
+  assert.ok(label, `label "${labelName}" does not exist on the board`);
   const card = await trello("POST", "/cards", { idList: env("E2E_TRELLO_LIST_ID"), idLabels: label.id, name, desc });
   return card.id;
 };
