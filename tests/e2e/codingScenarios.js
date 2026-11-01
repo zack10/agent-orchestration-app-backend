@@ -8,10 +8,13 @@
 // the same paths for grading only). Hidden files never leave this
 // repository: the agent cannot see or edit them.
 const { execFile } = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { promisify } = require("node:util");
+
+const { removeServices, startServices } = require("../../dist/services/workspaceService");
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.join(__dirname, "coding-scenarios");
@@ -78,9 +81,9 @@ const writeTree = (dir, files) => {
 /** A grader command with "{files}" replaced by the given paths. */
 const graderCommand = (command, files = []) => command.flatMap((part) => (part === "{files}" ? files : [part]));
 
-/** Runs a command in a throwaway container without network access, in `dir` mounted at /w. */
-const runContainer = async (image, dir, command, { env = {}, mounts = [] } = {}) => {
-  const args = ["run", "--rm", "--network", "none", "--cpus", "2", "--memory", "1g", "--pids-limit", "256"];
+/** Runs a command in a throwaway container, without network unless one is named, in `dir` mounted at /w. */
+const runContainer = async (image, dir, command, { env = {}, mounts = [], network = "none" } = {}) => {
+  const args = ["run", "--rm", "--network", network, "--cpus", "2", "--memory", "1g", "--pids-limit", "256"];
   for (const [name, value] of Object.entries(env)) args.push("-e", `${name}=${value}`);
   for (const [source, target, mode = "rw"] of [[dir, "/w"], ...mounts]) args.push("-v", `${source}:${target}:${mode}`);
   args.push("-w", "/w", image, ...command);
@@ -93,20 +96,24 @@ const runContainer = async (image, dir, command, { env = {}, mounts = [] } = {})
 };
 
 /** Runs one of the suite's grader commands; a suite's build cache is kept in a named volume. */
-const runGrader = (suite, dir, command) =>
+const runGrader = (suite, dir, command, network) =>
   runContainer(suite.grader.image, dir, command, {
     env: suite.grader.env,
     mounts: suite.grader.cache ? [[`coding-eval-cache-${suite.name}`, suite.grader.cache]] : [],
+    network,
   });
 
 /**
  * Grades a set of files the way a reviewer would: optionally apply a diff,
  * run the project's own tests, then add the hidden files and run them. The
- * code under test runs only inside containers without network.
+ * code under test runs only inside containers without network, beside the
+ * suite's `grader.services` (started the way a run starts them). Only
+ * `grader.setup` (installing dependencies into the cache) has network.
  */
 const grade = async (suite, files, hiddenFiles, diff = "") => {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "coding-eval-"));
   const patchDir = fs.mkdtempSync(path.join(os.tmpdir(), "coding-eval-patch-"));
+  const servicesId = `coding-eval-${crypto.randomBytes(6).toString("hex")}`;
   try {
     writeTree(workDir, files);
     if (diff.trim()) {
@@ -116,11 +123,18 @@ const grade = async (suite, files, hiddenFiles, diff = "") => {
       });
       if (!applied.passed) return { applied: false, visiblePassed: false, hiddenPassed: false, output: applied.output };
     }
-    const visible = await runGrader(suite, workDir, suite.grader.test);
+    if (suite.grader.setup) {
+      const setup = await runGrader(suite, workDir, suite.grader.setup, "bridge");
+      if (!setup.passed) throw new Error(`${suite.name}: grader setup failed:\n${setup.output.slice(-2000)}`);
+    }
+    const network = suite.grader.services
+      ? await startServices(servicesId, { image: suite.grader.image, services: suite.grader.services })
+      : undefined;
+    const visible = await runGrader(suite, workDir, suite.grader.test, network);
     // The hidden files are added only after the project's own tests ran.
     writeTree(workDir, hiddenFiles);
     const hidden = hiddenFiles.size
-      ? await runGrader(suite, workDir, graderCommand(suite.grader.hiddenTest, [...hiddenFiles.keys()]))
+      ? await runGrader(suite, workDir, graderCommand(suite.grader.hiddenTest, [...hiddenFiles.keys()]), network)
       : { passed: true, output: "" };
     return {
       applied: true,
@@ -131,6 +145,7 @@ const grade = async (suite, files, hiddenFiles, diff = "") => {
       output: [visible.passed ? "" : visible.output, hidden.passed ? "" : hidden.output].join("\n").trim(),
     };
   } finally {
+    if (suite.grader.services) await removeServices(servicesId);
     fs.rmSync(workDir, { recursive: true, force: true });
     fs.rmSync(patchDir, { recursive: true, force: true });
   }

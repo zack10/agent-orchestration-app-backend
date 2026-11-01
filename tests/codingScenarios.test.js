@@ -24,7 +24,7 @@ const docker = spawnSync("docker", ["version"], { encoding: "utf8" }).status ===
 const needsDocker = { skip: docker ? false : "Docker is not available" };
 
 test("every suite has a language, an environment and at least 3 valid scenarios", () => {
-  assert.deepEqual(suites.map((suite) => suite.name).sort(), ["go", "node", "python"]);
+  assert.deepEqual(suites.map((suite) => suite.name).sort(), ["go", "node", "python", "python-db"]);
   for (const suite of suites) {
     assert.ok(suite.language && suite.environment?.toolchain?.checks, `${suite.name}: language and environment`);
     assert.ok(suite.grader.image && suite.grader.test && suite.grader.hiddenTest, `${suite.name}: grader`);
