@@ -65,12 +65,7 @@ class RabbitMQService {
     try {
       this.model = await connect(config.rabbitMqUrl);
       this.connection = this.model.connection;
-      this.channel = await this.model.createConfirmChannel();
-
-      await this.channel.assertExchange(AGENT_EXCHANGE, "topic", {
-        durable: true,
-      });
-      await this.restoreSubscriptions();
+      await this.openChannel();
 
       console.log("Connected to RabbitMQ");
 
@@ -89,6 +84,34 @@ class RabbitMQService {
       console.error(`Failed to connect to RabbitMQ: ${describeError(error)}`);
       throw error;
     }
+  }
+
+  /**
+   * Opens the channel and restores the subscriptions on it. The broker can
+   * close a channel alone (e.g. a delivery not acknowledged within its
+   * consumer timeout); without an "error" listener that crashes the process,
+   * so the channel is reopened on the same connection instead.
+   */
+  private async openChannel(): Promise<void> {
+    const model = this.model!;
+    const channel = await model.createConfirmChannel();
+    channel.on("error", (err) => {
+      console.error(`RabbitMQ channel error: ${describeError(err)}`);
+    });
+    channel.on("close", () => {
+      if (this.channel !== channel) return;
+      this.channel = null;
+      // A closing connection reconnects on its own; only a lone channel close is handled here.
+      if (this.closing || this.model !== model) return;
+      console.warn("RabbitMQ channel closed; reopening it");
+      this.openChannel().catch((error) => {
+        console.error(`Could not reopen the RabbitMQ channel: ${describeError(error)}`);
+        void model.close().catch(() => undefined);
+      });
+    });
+    await channel.assertExchange(AGENT_EXCHANGE, "topic", { durable: true });
+    this.channel = channel;
+    await this.restoreSubscriptions();
   }
 
   /**
