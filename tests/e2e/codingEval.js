@@ -33,6 +33,7 @@ const { cleanFiles, diffStats, grade, isTestFile, loadScenarios, loadSuites, sce
 const {
   PIPELINE_ENV,
   approvePlan,
+  artifactPath,
   createCard,
   ensureFixtures,
   getExecution,
@@ -185,8 +186,8 @@ const runScenario = async (fixtures, scenario, runNumber) => {
 
     if (execution.status === "AWAITING_PUBLISH_APPROVAL") {
       const artifact = execution.artifacts.find((candidate) => candidate.type === "DIFF");
-      // The runner shares the server's disk; the hash proves it is the approved diff.
-      const diff = fs.readFileSync(artifact.storagePath, "utf8");
+      // The runner reads the server's disk; the hash proves it is the approved diff.
+      const diff = fs.readFileSync(artifactPath(artifact), "utf8");
       // Same formula as hashSnapshot in src/services/executionService.ts.
       if (crypto.createHash("sha256").update(JSON.stringify(diff)).digest("hex") !== artifact.sha256)
         throw new Error("diff artifact does not match its recorded sha256");

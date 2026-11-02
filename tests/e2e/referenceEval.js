@@ -10,6 +10,9 @@
 // test log matched with the project's grader.resultPattern).
 // Writes docs/testing/reference-<date>.md and restores main.
 //
+// --parallel N: N projects at once, one sandbox repo and card label each, as
+// in codingEval.js (E2E_GITHUB_EXTRA_REPOS, EXECUTION_RUN_CONCURRENCY >= N).
+//
 // --publish (one project only): approve publishing instead, so the run
 // opens a draft PR on the sandbox repo, and leave main at the project so
 // the PR's diff stays readable; the next run without it restores main.
@@ -37,6 +40,7 @@ const {
 const {
   PIPELINE_ENV,
   approvePlan,
+  artifactPath,
   createCard,
   ensureFixtures,
   github,
@@ -88,18 +92,16 @@ const projectFiles = async (project, instance) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "reference-"));
   const { stdout: container } = await docker(["create", project.grader.image]);
   try {
-    await docker(["cp", `${container.trim()}:${project.grader.workdir}/.`, dir]);
-    // The image's prepare step checked out the base commit; make sure.
-    await execFileAsync("git", ["-C", dir, "checkout", "-q", "--force", instance.base.sha]);
-    const { stdout: head } = await execFileAsync("git", ["-C", dir, "rev-parse", "HEAD"]);
-    if (head.trim() !== instance.base.sha) throw new Error(`image is at ${head.trim()}, expected ${instance.base.sha}`);
-    // "<mode> <sha> <stage>\t<path>": the mode keeps executable scripts executable.
-    const { stdout: listed } = await execFileAsync("git", ["-C", dir, "ls-files", "-s", "-z"], { maxBuffer: 50_000_000 });
+    // Only the git data: the working tree can hold build output with symlinks Windows can't create.
+    await docker(["cp", `${container.trim()}:${project.grader.workdir}/.git`, path.join(dir, ".git")]);
+    // "<mode> <type> <sha>\t<path>" at the base commit: the mode keeps executable scripts executable.
+    const { stdout: listed } = await execFileAsync("git", ["-C", dir, "ls-tree", "-r", "-z", instance.base.sha], { maxBuffer: 50_000_000 });
     const files = new Map();
     for (const entry of listed.split("\0").filter(Boolean)) {
       const [info, file] = entry.split("\t");
-      // The stored blob, not the checked-out file: git on Windows may have converted its line endings.
-      const [mode, sha] = info.split(" ");
+      // The stored blob, not a checked-out file: git on Windows may convert line endings. Submodules are not blobs.
+      const [mode, type, sha] = info.split(" ");
+      if (type !== "blob") continue;
       const { stdout: content } = await execFileAsync("git", ["-C", dir, "cat-file", "blob", sha], { encoding: "buffer", maxBuffer: 50_000_000 });
       files.set(file, { mode, content });
     }
@@ -111,9 +113,9 @@ const projectFiles = async (project, instance) => {
 };
 
 /** Replaces the sandbox repo's main with `files` ({ mode, content: Buffer }, so binary files survive). */
-const pushProject = async (files, message) => {
+const pushProject = async (files, message, repo) => {
   const branch = env("E2E_GITHUB_DEFAULT_BRANCH", "main");
-  const ref = await github("GET", `${repoPath()}/git/ref/heads/${branch}`);
+  const ref = await github("GET", `${repoPath(repo)}/git/ref/heads/${branch}`);
   const tree = [];
   // Text goes inline in the one tree request: a request per file trips
   // GitHub's secondary rate limit. Only binary files need a blob each.
@@ -123,13 +125,13 @@ const pushProject = async (files, message) => {
     const text = content.toString("utf8");
     if (!text.includes("\0") && Buffer.from(text, "utf8").equals(content)) tree.push({ path: file, mode, type: "blob", content: text });
     else {
-      const blob = await github("POST", `${repoPath()}/git/blobs`, { content: content.toString("base64"), encoding: "base64" });
+      const blob = await github("POST", `${repoPath(repo)}/git/blobs`, { content: content.toString("base64"), encoding: "base64" });
       tree.push({ path: file, mode, type: "blob", sha: blob.sha });
     }
   }
-  const created = await github("POST", `${repoPath()}/git/trees`, { tree });
-  const commit = await github("POST", `${repoPath()}/git/commits`, { message, tree: created.sha, parents: [ref.object.sha] });
-  await github("PATCH", `${repoPath()}/git/refs/heads/${branch}`, { sha: commit.sha });
+  const created = await github("POST", `${repoPath(repo)}/git/trees`, { tree });
+  const commit = await github("POST", `${repoPath(repo)}/git/commits`, { message, tree: created.sha, parents: [ref.object.sha] });
+  await github("PATCH", `${repoPath(repo)}/git/refs/heads/${branch}`, { sha: commit.sha });
   return commit.sha;
 };
 
@@ -168,16 +170,23 @@ const gradeDiff = async (project, instance, diff) => {
       const pattern = new RegExp(resultPattern);
       for (const line of stdout.slice(stdout.indexOf("GRADE_LOG_START")).split("\n")) {
         const groups = pattern.exec(line)?.groups;
-        if (groups && suites.get(groups.name) !== "FAIL") suites.set(groups.name, groups.status === "PASS" ? "PASS" : "FAIL");
+        // Runners word a pass differently: PASS (go, jest, automake), ok (cargo), Passed (ctest), Success (CMake checks).
+        // The benchmark lower-cases some projects' names (Catch2), so names are compared without case.
+        const name = groups?.name.toLowerCase();
+        if (groups && suites.get(name) !== "FAIL") suites.set(name, /^(PASS|ok|Passed|Success)$/.test(groups.status) ? "PASS" : "FAIL");
       }
     }
     for (const tag of stdout.match(/<testsuite [^>]*>/g) ?? []) {
       const attribute = (name) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1];
       const failed = Number(attribute("failures") ?? 0) + Number(attribute("errors") ?? 0) > 0;
-      suites.set(attribute("name"), failed ? "FAIL" : "PASS");
+      suites.set(attribute("name")?.toLowerCase(), failed ? "FAIL" : "PASS");
     }
     // The benchmark cuts some subtest names short ("a/b" for "a/b/c"); a parent fails when a subtest does.
-    const status = (name) => suites.get(name) ?? suites.get(name.split("/")[0]) ?? "MISSING";
+    // Jest names are "file:test" but the log reports per file; a test passes with its file.
+    const status = (test) => {
+      const name = test.toLowerCase();
+      return suites.get(name) ?? suites.get(name.split("/")[0]) ?? suites.get(name.split(":")[0]) ?? "MISSING";
+    };
     const failing = (names) => names.filter((name) => status(name) !== "PASS").map((name) => `${name} (${status(name)})`);
     // Tests that cannot pass in the offline grader (e.g. they need a network interface), per project.
     const graded = (tests) => Object.keys(tests).filter((name) => !(project.grader.skip ?? []).includes(name.split("/")[0]));
@@ -189,9 +198,8 @@ const gradeDiff = async (project, instance, diff) => {
   }
 };
 
-// The shared sandbox repository's own policy, put back after the projects ran.
-let originalPolicy;
-const ORIGINAL_POLICY = (fixtures) => (originalPolicy ??= fixtures.repository.executionPolicy ?? {});
+// Each sandbox repository's own policy, put back after the projects ran.
+const ORIGINAL_POLICY = (fixtures) => (fixtures.originalPolicy ??= fixtures.repository.executionPolicy ?? {});
 
 /** Sets the sandbox repository's execution policy (limits such as the setup timeout), if it differs. */
 const usePolicy = async (fixtures, executionPolicy) => {
@@ -217,8 +225,8 @@ const runProject = async (fixtures, project, publish) => {
     await useEnvironment(fixtures, project.environment ?? {});
     await usePolicy(fixtures, { ...ORIGINAL_POLICY(fixtures), ...project.executionPolicy });
     log(`${project.id}: pushing ${files.size} files at ${instance.base.sha.slice(0, 8)}`);
-    const baseSha = await pushProject(files, `reference: ${project.id} at ${instance.base.sha} (${id})`);
-    cardId = await createCard(`[${id}] ${issue.title}`, issue.body ?? "");
+    const baseSha = await pushProject(files, `reference: ${project.id} at ${instance.base.sha} (${id})`, fixtures.repo);
+    cardId = await createCard(`[${id}] ${issue.title}`, issue.body ?? "", fixtures.label);
     const workItem = await ingestCard(fixtures, cardId);
     const { data: detail } = await api("GET", `/api/work-items/${workItem.id}`, { expectStatus: 200 });
     result.executionId = detail.executions[0].id;
@@ -236,7 +244,7 @@ const runProject = async (fixtures, project, publish) => {
 
     if (execution.status === "AWAITING_PUBLISH_APPROVAL") {
       const artifact = execution.artifacts.find((candidate) => candidate.type === "DIFF");
-      const diff = fs.readFileSync(artifact.storagePath, "utf8");
+      const diff = fs.readFileSync(artifactPath(artifact), "utf8");
       // Same formula as hashSnapshot in src/services/executionService.ts.
       if (crypto.createHash("sha256").update(JSON.stringify(diff)).digest("hex") !== artifact.sha256)
         throw new Error("diff artifact does not match its recorded sha256");
@@ -322,7 +330,11 @@ const writeReport = (results, meta) => {
 };
 
 const main = async () => {
-  const wanted = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
+  const args = process.argv.slice(2);
+  const parallelAt = args.indexOf("--parallel");
+  const parallel = parallelAt >= 0 ? Number.parseInt(args[parallelAt + 1], 10) : 1;
+  if (!(parallel >= 1)) throw new Error("--parallel must be a positive number");
+  const wanted = args.filter((arg, index) => !arg.startsWith("--") && (parallelAt < 0 || index !== parallelAt + 1));
   const check = process.argv.includes("--check");
   const publish = process.argv.includes("--publish");
   const missing = skipUnless([...PIPELINE_ENV, "E2E_GITHUB_TOKEN"]);
@@ -334,7 +346,13 @@ const main = async () => {
   if (publish && projects.length > 1) throw new Error("--publish runs one project; name it (e.g. go/go-zero-1969)");
 
   await assertServerHealthy();
-  const fixtures = await ensureFixtures();
+  // One sandbox repository and card label per parallel slot; the first is the usual one.
+  const repos = [env("E2E_GITHUB_REPO"), ...env("E2E_GITHUB_EXTRA_REPOS", "").split(",").map((repo) => repo.trim()).filter(Boolean)];
+  if (parallel > repos.length) throw new Error(`--parallel ${parallel} needs ${parallel - 1} repositories in E2E_GITHUB_EXTRA_REPOS`);
+  const slots = [];
+  // In turn: each call also refreshes the shared project and agent.
+  for (const [index, repo] of repos.slice(0, Math.min(parallel, projects.length)).entries())
+    slots.push(await ensureFixtures({ repo, label: index ? `${env("E2E_TRELLO_LABEL")}-${index + 1}` : env("E2E_TRELLO_LABEL") }));
   if (check) {
     // No model calls: the instances load, the images run, and the known fix grades as correct.
     for (const project of projects) {
@@ -349,15 +367,27 @@ const main = async () => {
   }
   const { stdout: commit } = await execFileAsync("git", ["rev-parse", "--short", "HEAD"]).catch(() => ({ stdout: "unknown" }));
   log(`${projects.length} project(s) with ${env("E2E_LLM_PROVIDER")}/${env("E2E_LLM_MODEL")}${env("E2E_PRICE_PER_MTOK") ? "" : " (set E2E_PRICE_PER_MTOK for cost)"}`);
-  const results = [];
+  const results = new Array(projects.length);
+  let next = 0;
   try {
-    for (const project of projects) results.push(await runProject(fixtures, project, publish));
+    // Each slot takes the next project when its run ends; results keep the project order.
+    await Promise.all(
+      slots.map(async (fixtures) => {
+        while (next < projects.length) {
+          const index = next++;
+          results[index] = await runProject(fixtures, projects[index], publish);
+        }
+      }),
+    );
   } finally {
     const suite = loadSuites().find((candidate) => candidate.name === DEFAULT_SUITE);
-    if (publish) log("--publish: main left at the project so the draft PR stays readable");
-    else await setDefaultBranch(cleanFiles(suite), "reference: restore clean project").catch((error) => log(`could not restore main: ${error.message}`));
-    await useEnvironment(fixtures, suiteEnvironment(suite)).catch((error) => log(`could not restore the environment: ${error.message}`));
-    await usePolicy(fixtures, ORIGINAL_POLICY(fixtures)).catch((error) => log(`could not restore the policy: ${error.message}`));
+    for (const fixtures of slots) {
+      if (publish) log("--publish: main left at the project so the draft PR stays readable");
+      else
+        await setDefaultBranch(cleanFiles(suite), "reference: restore clean project", fixtures.repo).catch((error) => log(`could not restore ${fixtures.repo} main: ${error.message}`));
+      await useEnvironment(fixtures, suiteEnvironment(suite)).catch((error) => log(`could not restore ${fixtures.repo}'s environment: ${error.message}`));
+      await usePolicy(fixtures, ORIGINAL_POLICY(fixtures)).catch((error) => log(`could not restore ${fixtures.repo}'s policy: ${error.message}`));
+    }
   }
   const file = writeReport(results, { date: new Date().toLocaleDateString("sv"), commit: commit.trim() });
   log(`report: ${path.relative(process.cwd(), file)}`);

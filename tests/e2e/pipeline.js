@@ -2,6 +2,7 @@
 // Trello/GitHub calls, the long-lived fixtures, and waiting on executions.
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
+const path = require("node:path");
 
 const { loadSuites } = require("./codingScenarios");
 const { api, env, external, poll } = require("./helpers");
@@ -218,10 +219,21 @@ const ingestCard = async ({ integration, project }, cardId) => {
   return workItem;
 };
 
+/**
+ * Where this runner can read an artifact the server wrote. The server reports
+ * its own path; E2E_ARTIFACT_DIR is that folder as seen from here when the
+ * server runs elsewhere (e.g. the production stack in WSL, the runner on Windows).
+ */
+const artifactPath = (artifact) => {
+  const dir = env("E2E_ARTIFACT_DIR");
+  return dir ? path.join(dir, path.posix.basename(artifact.storagePath)) : artifact.storagePath;
+};
+
 module.exports = {
   FAILED_STATES,
   PIPELINE_ENV,
   approvePlan,
+  artifactPath,
   createCard,
   ensureFixtures,
   getExecution,
