@@ -73,6 +73,15 @@ const SETUP_TIMEOUT_MS = 900_000;
 const envArgs = (env: Record<string, string> = {}) =>
   Object.entries(env).flatMap(([name, value]) => ["-e", `${name}=${value}`]);
 
+// On a Linux host the workspace belongs to the host user, not the container's,
+// and git refuses it ("dubious ownership"). We cloned it ourselves, so trust it;
+// env config also covers git run by the repository's own checks, in any image.
+const TRUST_WORKSPACE = envArgs({
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_KEY_0: "safe.directory",
+  GIT_CONFIG_VALUE_0: SANDBOX_ROOT,
+});
+
 const dockerArgs = (
   root: string,
   network: boolean,
@@ -88,6 +97,7 @@ const dockerArgs = (
   // `-e NAME` without a value makes docker read it from our process env.
   ...(withToken ? ["-e", "GITHUB_TOKEN"] : []),
   ...envArgs(options.env),
+  ...TRUST_WORKSPACE,
   ...workspaceMounts(root, !options.image),
   "-w",
   SANDBOX_ROOT,
@@ -149,8 +159,12 @@ export const runDocker = async (
   command: string[],
   network = false,
 ) => {
+  // Git commands here walk everything setup installed (e.g. a Rust target/
+  // tree), so they get setup's bound, not the 5-minute default (found on fd).
   const result = await execDocker(
     dockerArgs(workspacePath(id), network, false, command),
+    undefined,
+    SETUP_TIMEOUT_MS,
   );
   return { stdout: result.stdout, stderr: result.stderr };
 };
@@ -710,6 +724,7 @@ export const startSandbox = async (id: string, toolchain: Toolchain) => {
     services ?? "none",
     // `docker exec` inherits these, so every command sees the toolchain's caches.
     ...envArgs(toolchain.env),
+    ...TRUST_WORKSPACE,
     ...workspaceMounts(workspacePath(id), false),
     "-w",
     SANDBOX_ROOT,

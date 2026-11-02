@@ -17,6 +17,7 @@ build/
 .env.cloud
 !.env.example
 !.env.e2e.example
+!.env.prod.example
 
 # Debug logs
 npm-debug.log*
