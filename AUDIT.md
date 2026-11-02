@@ -280,6 +280,13 @@ Fixed before Phase 0 of `docs/plans/AGENTIC_ROADMAP.md`, because each would skew
 - [x] Exponential backoff on 429/503/529 in `LLMService` (honours `Retry-After`, fails fast on exhausted credits or long quota waits). Timeouts are not retried.
 - [ ] Per-user tokens or an actor bound to the token; record the real approver.
 
+### - [x] M13 — Labelling one Trello card re-ran every labelled card
+**Status:** DONE · **Fix ref:** 2026-11-02
+**Where:** `src/integrations/trelloAdapter.ts` (`revisionHash`)
+**Found:** a reference eval on a fresh database: the revision hash included whole label objects, whose `uses` count changes on every card when any card gets or loses the label, so each new labelled card gave every other labelled card a new idempotency key and a new execution (triage, plan, ticket comments).
+**Fix:**
+- [x] Hash only each label's `id` and `name` (labels with only a name hash as before). Existing labelled cards get one new execution after the change.
+
 ---
 
 ## Low

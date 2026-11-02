@@ -16,7 +16,7 @@ export interface TrelloCard {
   desc: string;
   url: string;
   idList: string;
-  labels: Array<{ name: string }>;
+  labels: Array<{ id?: string; name: string }>;
 }
 /** A card's "commentCard" action, as GET /cards/:id/actions returns it. */
 export interface TrelloCommentAction {
@@ -71,7 +71,9 @@ export const toWorkItems = (
           JSON.stringify({
             name: card.name,
             desc: card.desc,
-            labels: card.labels,
+            // Not whole labels: their `uses` count changes on every card when any
+            // card gets or loses the label, which re-ran every labelled card.
+            labels: card.labels.map(({ id, name }) => ({ id, name })),
             idList: card.idList,
           }),
         )
