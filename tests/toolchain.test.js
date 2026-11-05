@@ -283,6 +283,31 @@ test("checks reach the run's services by name, and nothing else", { skip: requir
   assert.notEqual(require("node:child_process").spawnSync("docker", ["network", "inspect", `agent-net-${id}`]).status, 0, "the network is removed");
 });
 
+test("a new environment cache replaces the repository's old one", { skip: require("node:child_process").spawnSync("docker", ["version"]).status === 0 ? false : "Docker is not available" }, async (t) => {
+  const fs = require("node:fs");
+  const { execFileSync } = require("node:child_process");
+  const { removeEnvironmentSnapshot, setupWorkspace, workspacePath } = require("../dist/services/workspaceService");
+  const scope = `cache-test-${process.pid}`;
+  const images = (...args) => execFileSync("docker", ["images", ...args], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+  const run = async (id, setup) => {
+    fs.mkdirSync(workspacePath(id), { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: workspacePath(id) });
+    const result = await setupWorkspace(id, { image: "alpine:3.20", env: {}, setup: ["sh", "-c", setup] }, [], { cacheFor: scope });
+    await removeEnvironmentSnapshot(id);
+    fs.rmSync(workspacePath(id), { recursive: true, force: true });
+    return result.cache;
+  };
+  t.after(() => {
+    for (const image of images(`agent-cache-${scope}`, "--format", "{{.Repository}}:{{.Tag}}"))
+      execFileSync("docker", ["rmi", "-f", image]);
+  });
+
+  assert.equal(await run(`${scope}-a`, "echo a > /a"), "built");
+  assert.equal(await run(`${scope}-b`, "echo b > /b"), "built");
+  assert.equal(images(`agent-cache-${scope}`, "-q").length, 1, "only the new cache is kept");
+  assert.deepEqual(images("-q", "--filter", "dangling=true", "--filter", `label=agent.environment-cache=agent-cache-${scope}`), []);
+});
+
 test("environment snapshots are cached per repository and per environment", () => {
   const { environmentCacheImage } = require("../dist/services/workspaceService");
   const toolchain = { image: "example/runtime:1", setup: ["sh", "-c", "make deps"], env: { A: "1", B: "2" } };

@@ -449,9 +449,13 @@ const storeEnvironmentCache = async (snapshot: string, cache: string) => {
   for (const old of stdout.split("\n").map((line) => line.trim()).filter((line) => line && line !== cache))
     await exec("docker", ["rmi", old]).catch(() => undefined);
   // Replaced caches still used by a running execution's snapshot stay until it ends.
-  await exec("docker", ["image", "prune", "-f", "--filter", `label=${CACHE_LABEL}=${cacheRepository(cache)}`]).catch(
-    () => undefined,
-  );
+  // Removed by ID: on Docker's containerd store `image prune`, whatever its filter,
+  // breaks another execution's `docker commit` that is in progress ("No such image").
+  const { stdout: dangling } = await exec("docker", [
+    "images", "-q", "--filter", "dangling=true", "--filter", `label=${CACHE_LABEL}=${cacheRepository(cache)}`,
+  ]).catch(() => ({ stdout: "" }));
+  for (const image of new Set(dangling.split("\n").map((line) => line.trim()).filter(Boolean)))
+    await exec("docker", ["rmi", image]).catch(() => undefined);
 };
 
 // Inside the snapshot, outside the workspace: what setup installed there.

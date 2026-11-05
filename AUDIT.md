@@ -287,6 +287,13 @@ Fixed before Phase 0 of `docs/plans/AGENTIC_ROADMAP.md`, because each would skew
 **Fix:**
 - [x] Hash only each label's `id` and `name` (labels with only a name hash as before). Existing labelled cards get one new execution after the change.
 
+### - [x] M14 — One run's cache cleanup destroyed another run's environment snapshot
+**Status:** DONE · **Fix ref:** 2026-11-05
+**Where:** `src/services/workspaceService.ts` (`storeEnvironmentCache`)
+**Found:** a reference eval with two runs in parallel (fd, Rust): 3 of 4 runs failed with `No such image: agent-env-<id>:latest` right after a ~10-minute setup and redid it from scratch. On Docker's containerd image store, `docker image prune` breaks any `docker commit` in progress, whatever its `--filter label=` (reproduced with plain docker: 2 of 2 commits failed with a prune loop beside them, 0 of 2 with images removed by ID). Each run pruned its repository's dangling caches after committing, so it hit the other run's commit.
+**Fix:**
+- [x] List the repository's dangling cache images and `docker rmi` each by ID instead of pruning. Test: a new cache replaces the old one and leaves nothing dangling.
+
 ---
 
 ## Low
