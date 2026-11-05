@@ -182,15 +182,15 @@
     }
   },
   {
-    "id": "cpp/catch2-2187",
+    "id": "cpp/catch2-2723",
     "language": "C++",
     "source": {
       "dataset": "ByteDance-Seed/Multi-SWE-bench",
       "file": "cpp/catchorg__Catch2_dataset.jsonl",
-      "number": 2187
+      "number": 2723
     },
     "grader": {
-      "image": "mswebench/catchorg_m_catch2:pr-2187",
+      "image": "mswebench/catchorg_m_catch2:pr-2723",
       "workdir": "/home/Catch2",
       "testPatch": "/home/test.patch",
       "test": [
