@@ -297,7 +297,7 @@ Fixed before Phase 0 of `docs/plans/AGENTIC_ROADMAP.md`, because each would skew
 ### - [ ] M15 — A worker that lost its run lease keeps running the execution
 **Status:** OPEN · **Found:** 2026-11-06
 **Where:** run lease and recovery sweep (`executionWorker` / `executionService`), `setupWorkspace`
-**Found:** the jq reference eval while the laptop went into Modern Standby for 5 hours: leases expired, the sweep handed the runs out again, and the original workers woke up and carried on. Two setups of the same execution then raced: one's `removeEnvironmentSnapshot` removed the other's setup container mid-commit ("You cannot commit container ... which is being removed", "failed to apply diff: snapshot ... does not exist").
+**Found:** the jq reference eval ([report](docs/testing/reference-2026-11-06.md)) while the laptop went into Modern Standby for 5 hours: leases expired, the sweep handed the runs out again, and the original workers woke up and carried on. Two setups of the same execution then raced: one's `removeEnvironmentSnapshot` removed the other's setup container mid-commit ("You cannot commit container ... which is being removed", "failed to apply diff: snapshot ... does not exist").
 **Fix:**
 - [ ] A worker checks it still holds the lease (heartbeat result) before each graph node and before Docker steps that create or remove the execution's containers and images, and stops if it lost it.
 - [ ] Test: a run whose lease was taken over stops without touching the new owner's containers.
