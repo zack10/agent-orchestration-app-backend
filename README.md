@@ -24,6 +24,7 @@ Built on PostgreSQL + Prisma, RabbitMQ, LangGraph, and pluggable LLM providers (
 - [Project structure](#project-structure)
 - [Known limits](#known-limits)
 - [Project docs](#project-docs)
+- [License](#license)
 
 ## Quick start
 
@@ -271,6 +272,8 @@ In both modes, policy, verification and review run afterwards, independently of 
 
 In `tool_loop` mode the reviewer reads the code with read-only tools (`list_files`, `read_file`, `search_code`) and answers a fixed checklist: does the diff change the code that produces the wrong behaviour, is every name it adds used by the existing code, do the new tests call the existing code, does the ticket's example work. Our code makes the decision from the answers, so a reviewer that finds a problem can't still approve.
 
+A test counts as evidence only if verification ran it. The command whose failure showed the problem (the agent's own new test) becomes a check that verification runs again on the finished change, and the reviewer gets the list of what verification ran: a new test file that no check runs proves nothing, however well it is written.
+
 An objection goes back to the next attempt as feedback. If the reviewer still objects after the last attempt, the verified change is not thrown away. It goes to publish approval with the objections attached, and they appear at the top of the Trello comment and the draft PR description. Only the automatic secret check blocks a change outright. Suggestions that don't reject the change are shown with it.
 
 #### Choosing models and reasoning per call
@@ -501,7 +504,7 @@ Behaviour worth knowing:
 | --- | --- |
 | Core | `NODE_ENV`, `PORT`, `DATABASE_URL`, `RABBITMQ_URL`, `ENCRYPTION_KEY` |
 | API access | `API_AUTH_TOKEN`, `API_AUTH_ACTOR`, `AUTH_DISABLED`, `CORS_ORIGINS`, `API_RATE_LIMIT_PER_MINUTE` |
-| LLM | `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `LLM_PROVIDERS`, `LLM_DEFAULT_PROVIDER`, `LLM_DEFAULT_MODEL`, `LLM_DAILY_TOKEN_LIMIT`, `LLM_REQUEST_TIMEOUT_MS`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_RATE_LIMIT_RETRIES` |
+| LLM | `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `LLM_PROVIDERS`, `LLM_DEFAULT_PROVIDER`, `LLM_DEFAULT_MODEL`, `LLM_DAILY_TOKEN_LIMIT`, `LLM_REQUEST_TIMEOUT_MS`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_RATE_LIMIT_RETRIES`, `OPENAI_TOOLS_API` |
 | Task pipeline | `TASK_MAX_ATTEMPTS`, `TASK_RETRY_DELAY_MS`, `TASK_LEASE_MS`, `GENERATED_CODE_MAX_FILES`, `GENERATED_CODE_MAX_FILE_BYTES`, `STORE_RAW_LLM_OUTPUT` |
 | Execution pipeline | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `INTEGRATION_POLL_INTERVAL_MS`, `EXECUTION_LEASE_MS`, `EXECUTION_RUN_CONCURRENCY`, `EXECUTION_PLAN_CONCURRENCY`, `PLAN_MAX_VERSIONS`, `EXECUTION_AGENT_MODE`, `AGENT_MAX_STEPS`, `EXECUTION_MAX_TOKENS`, `EXECUTION_MAX_DURATION_SECONDS`, `WORKSPACE_ROOT`, `KEEP_WORKSPACES`, `ARTIFACT_ROOT` |
 | Messaging | `CONSUMER_MAX_ATTEMPTS`, `CONSUMER_RETRY_DELAY_MS` |
@@ -529,12 +532,15 @@ Agents then use `"provider": "groq"` with a `model` the endpoint offers (`GET /a
 | `baseUrl` | API root. `https` only; `http` is allowed for `localhost` outside production |
 | `apiKeyEnv` | Environment variable holding the server's key. Omit for keyless local servers or when each agent sets `config.apiKey` |
 | `supportsTools` | Whether the endpoint supports tool calling (default `false`) |
+| `toolsApi` | `chat` (default) for Chat Completions, or `responses` for the OpenAI Responses API |
 | `modelPrefixes` | Optional: list only models whose id starts with one of these |
 | `label` | Optional display name used in errors and model lists |
 
 The server refuses to start if a profile is invalid (bad URL, duplicate key, `apiKeyEnv` not set). Base URLs come only from this configuration: an agent chooses a provider key, never a host, so it cannot make the server send a key elsewhere.
 
 An agent without a `provider` uses `LLM_DEFAULT_PROVIDER` and `LLM_DEFAULT_MODEL` (default `gemini` / `gemini-flash-latest`); an agent with a provider but no model fails with a clear error. APIs with their own format (e.g. AWS Bedrock, Vertex AI) still need a native provider class in `src/services/llm/providers/`.
+
+The built-in OpenAI provider makes tool calls through the Responses API (`OPENAI_TOOLS_API=responses`, the default). It keeps the model's reasoning from one step to the next, sent back encrypted with `store: false`, so nothing is kept at OpenAI; newer models such as `gpt-5.6-luna` refuse tools with reasoning on Chat Completions. `OPENAI_TOOLS_API=chat` goes back to Chat Completions.
 
 ## Testing
 
@@ -546,6 +552,7 @@ An agent without a `provider` uses `LLM_DEFAULT_PROVIDER` and `LLM_DEFAULT_MODEL
 | `npm run test:e2e` | End-to-end suites against a running server |
 | `npm run test:e2e:smoke` | Only the credential-free smoke suite |
 | `npm run eval:coding` | Coding benchmark: how well the agent fixes real bugs (see below) |
+| `npm run eval:reference` | Real issues from real projects in other languages, graded like Multi-SWE-bench (see below) |
 | `npm run eval:reviewer` | Replays stored approved diffs through the reviewer alone, graded by the hidden tests (`--model` to compare models, `--grade-only` for no model calls) |
 
 Run a single unit test file with `npm run build && node --test tests/auditFixes.test.js`. New test files must be added to the `test` script in `package.json`.
@@ -586,18 +593,33 @@ Python (`python/`, `unittest`) and Go (`go/`, `go test`), standard library only:
 | 01 | Discount tiers miss their minimum | `Truncate` cuts accented characters | Basic single-file fix |
 | 02 | Invoice totals a few cents off (`money` and `invoice`) | Negative amounts parsed and printed wrong (`Parse` and `Format`) | Multi-file change |
 | 03 | Vague "reorder list is missing things" | Vague "nightly job ran several times after downtime" | Finding the cause from a symptom |
+| 04 | | Go 03 without its worked example | A ticket with two readings: the approved plan shows which one the agent took |
+
+Python with PostgreSQL (`python-db/`, `unittest` against a real database started as a service):
+
+| # | Scenario | Measures |
+| --- | --- | --- |
+| 01 | Orders from the last day of a range are missing | Single-file fix in a SQL query |
+| 02 | Revenue report shows the wrong amounts | Two files, one of them SQL |
+| 03 | Vague "customer order counts are missing people" | Finding the cause (a join) from a symptom |
 
 Per run, the runner points the sandbox repo's `main` at the scenario's code, creates the Trello card, approves the plan, waits for a diff or `BLOCKED`, **rejects publishing** (no PR is opened), and grades the diff in a network-less Docker container: the repo's own tests, then the hidden tests, in the suite's grader image. Outcomes are *correct fix*, *wrong fix shipped* (a PR would have been opened with no warning but the hidden test fails, which is the key number), *wrong fix, reviewer objected* (the same, but the approver saw the reviewer's objections; the run also checks that the objections comment reached the Trello card), *correctly blocked*, *no fix* and *infrastructure failure*. Hidden tests check only what the ticket asks for, as in SWE-bench Verified. Each run's tokens, cache share and cost are in the report when `E2E_PRICE_PER_MTOK` is set ("input,cached,output" per million tokens, or per model: `gpt-5-mini=0.25,0.025,2;gpt-5-nano=0.05,0.005,0.4`); `E2E_REASONING_EFFORT` and `E2E_CALL_MODELS` set the agent's `reasoningEffort` and `models`. It writes `docs/testing/coding-eval-<date>.md`, prints a row for the roadmap's results log, and restores `main` to the clean project.
 
 ```bash
 npm run eval:coding -- --check            # setup check, no LLM calls
-npm run eval:coding -- --scenario python  # one suite (node, python, go)
+npm run eval:coding -- --scenario python  # one suite (node, python, python-db, go)
 npm run eval:coding -- --scenario node/01  # one scenario ("01" alone is 01 of every suite)
 npm run eval:coding -- --runs 3           # every scenario, 3 runs each
 npm run eval:coding -- --parallel 4       # 4 runs at once: E2E_GITHUB_EXTRA_REPOS has 3 more sandbox repos, the server EXECUTION_RUN_CONCURRENCY=4
 ```
 
 It needs the execution suite's variables plus `E2E_GITHUB_TOKEN` (Contents read/write on the sandbox repo), the server and Docker on the same machine (it reads the diff artifact from disk), and **it rewrites the sandbox repo's `main`**. `npm test` includes `tests/codingScenarios.test.js`, which checks every scenario is fair in its grader image (so it needs Docker, and is skipped without it): the clean project passes everything, and each bug passes the repo's tests but fails its hidden test by an assertion. Each suite runs with the environment in its `suite.json`; `E2E_ENVIRONMENT` replaces it for every suite.
+
+The benchmark runs on `gpt-5.6-luna` (`E2E_LLM_MODEL` in `.env.e2e`). Its baseline (2026-11-07, every scenario 3 times): 50 correct fixes out of 54, 3 tickets correctly declined, no wrong fix shipped and 1 flagged by the reviewer, for $0.42. Every run is in the results log of `docs/plans/AGENTIC_ROADMAP.md`, with reports in `docs/testing/`.
+
+### Reference projects
+
+`npm run eval:reference` runs real issues from real projects through the whole pipeline: Java (gson), Go (go-zero), Rust (fd), TypeScript (darkreader), JavaScript (dayjs), C (jq) and C++ (Catch2), listed in `tests/e2e/reference-projects/projects.json`. No environment is configured: discovery finds it. The diff is graded the way Multi-SWE-bench grades it, in the project's own image without network, with the instance's tests added. `--runs N` repeats each project (a conclusion needs at least 10), `--ticket clarified` uses a clearer rewrite of the issue, `--publish` opens the draft PR. Like the benchmark, it rewrites the sandbox repo's `main`.
 
 ## Troubleshooting
 
@@ -651,10 +673,9 @@ artifacts/              approved diffs, one per execution
 ## Known limits
 
 - **One tracker, one source host.** Trello is the only issue tracker and GitHub the only source control. Trackers are pluggable (`IssueTrackerAdapter`); source control is not yet (AUDIT A2).
-- **Any language, measured on three so far.** The benchmark covers Node, Python and Go; real projects in other stacks (the roadmap's reference projects) haven't been run yet, so Phase 4 of `docs/plans/AGENTIC_ROADMAP.md` is still in progress. The roadmap's "Known limitations" table lists every way the agent is still tied to one language, platform, service or kind of task, and the phase that removes each.
+- **Any language, still being proven.** The benchmark covers Node, Python (with and without PostgreSQL) and Go. The reference projects in other stacks have been run once each on an older model (`gpt-5-mini`), except the current Catch2 issue, which hasn't been run yet; on `gpt-5.6-luna`, only jq (C) has been measured so far, fixed 9 times in 10. Phase 4 of `docs/plans/AGENTIC_ROADMAP.md` is still in progress. The roadmap's "Known limitations" table lists every way the agent is still tied to one language, platform, service or kind of task, and the phase that removes each.
 - **`single_shot` mode selects context by file name.** The agent sees up to 12 files whose paths match ticket words, each cut at 20 KB, and returns whole files, so vague tickets and very large files are weak spots. `tool_loop` mode reads and searches the repository itself.
 - **Vague tickets can still get a wrong fix.** The agent sometimes adds new code beside the faulty function instead of fixing it. The reviewer catches this and the approver sees its objections, but the change still reaches approval.
-- **The newest OpenAI models** need the Responses API for tool calls, which isn't supported yet (roadmap limitation 24).
 - **One HTTP connector**, not a full Model Context Protocol transport. Skills and MCP resources are stored and assignable but not yet included in prompts.
 - **Process-local** rate limiting and logs. Multi-instance deployments need a shared limiter (e.g. Redis), centralized logs, metrics and tracing.
 
@@ -668,3 +689,7 @@ artifacts/              approved diffs, one per execution
 - `docs/history/`: earlier phase plans and walkthroughs.
 
 Planning docs describe intent and past phases; the code and this README describe current behaviour.
+
+## License
+
+Tickwright is licensed under the [Apache License 2.0](LICENSE).
