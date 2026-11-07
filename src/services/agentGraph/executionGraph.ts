@@ -26,7 +26,7 @@ import {
   resolveAgentCalls,
 } from "./agentCalls";
 import type { CallModel, ReasoningEffortConfig } from "./agentCalls";
-import { ReviewVerdict, SANDBOX_TOOLS, describeReproduction } from "../sandbox/tools";
+import { ReviewVerdict, SANDBOX_TOOLS, agentTestCheck, describeReproduction } from "../sandbox/tools";
 import { REVIEW_MAX_TOKENS, reviewOutcome, runReviewer } from "./reviewer";
 import {
   executionToolContext,
@@ -171,6 +171,8 @@ const ExecutionGraphState = Annotation.Root({
     reducer: (_current, update) => update,
     default: () => "Not tracked: the change was made without tools.",
   }),
+  // The command whose failure showed the problem ("" if none); verification runs it again.
+  reproductionCommand: Annotation<string>({ reducer: (_current, update) => update, default: () => "" }),
 });
 
 type GraphState = typeof ExecutionGraphState.State;
@@ -701,7 +703,8 @@ const agentLoop = async (state: GraphState) => {
     if (changed.length > 0) {
       const codeChanged = changed.some((file) => !isTestFile(toolchain, file));
       const reproduction = describeReproduction(ctx.reproduction, codeChanged);
-      return { attemptNumber, attemptId: attempt.id, attemptLog, keepChanges, reproduction, route: "implemented" as GraphRoute };
+      const reproductionCommand = ctx.reproduction.command ?? "";
+      return { attemptNumber, attemptId: attempt.id, attemptLog, keepChanges, reproduction, reproductionCommand, route: "implemented" as GraphRoute };
     }
     failure = `The agent called finish without changing any files: ${outcome.summary}`;
   } else if ((outcome.stopReason === "max_tokens" || outcome.stopReason === "timeout") && !executionSpent) {
@@ -782,10 +785,14 @@ const verifyChange = async (state: typeof ExecutionGraphState.State) => {
   const toolchain = requireToolchain(state);
   // Checks judge only the diff: nothing hidden from it may influence them.
   await prepareVerification(state.executionId, toolchain.image, state.setupOutputs);
+  const checks = selectChecks(toolchain, execution.repository.verificationConfig);
+  // The agent's own test runs too, after the repository's checks have built the change.
+  const agentTest = agentTestCheck({ command: state.reproductionCommand });
+  const runsAlready = (command: string[]) => checks.run.some((check) => check.command.join(" ") === command.join(" ") || check.command.join(" ") === command[2]);
   const verification = await verifyWorkspace(
     state.executionId,
     toolchain,
-    selectChecks(toolchain, execution.repository.verificationConfig),
+    agentTest && !runsAlready(agentTest.command) ? { ...checks, run: [...checks.run, agentTest] } : checks,
     Object.keys(state.failingBefore),
   );
 
@@ -883,6 +890,16 @@ const reviewWithTools = async (
   return { prompt, review };
 };
 
+/** What verification ran on this change, for the reviewer: a test is evidence only if one of these ran it. */
+export const describeChecksRun = (verification: unknown) => {
+  const { results } = (verification ?? {}) as { results?: Array<{ script: string; passed: boolean; unavailable?: true; failingBefore?: true }> };
+  const ran = (results ?? []).filter((result) => !result.unavailable);
+  if (!ran.length) return "No checks ran: nothing about this change was tested.";
+  return ran
+    .map((result) => `- ${result.script}: ${result.failingBefore ? "failed, as it already did on the unmodified code" : "passed"}`)
+    .join("\n");
+};
+
 const reviewDiff = async (state: typeof ExecutionGraphState.State) => {
   if (!state.attemptId) throw new Error("Execution graph is missing attempt");
 
@@ -915,7 +932,7 @@ const reviewDiff = async (state: typeof ExecutionGraphState.State) => {
   let prompt: RenderedPrompt;
   let review: ReviewVerdict;
   if (state.agentMode === "tool_loop") {
-    ({ prompt, review } = await reviewWithTools(state, reviewInput));
+    ({ prompt, review } = await reviewWithTools(state, { ...reviewInput, verification: describeChecksRun(state.verification) }));
   } else {
     prompt = renderExecutionPrompt("review", reviewInput);
     const parsed = parseJsonRecord(await askAgent(state, prompt));

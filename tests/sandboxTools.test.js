@@ -4,7 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { REVIEW_TOOLS, SANDBOX_TOOLS, executeTool } = require("../dist/services/sandbox/tools");
+const { REVIEW_TOOLS, SANDBOX_TOOLS, agentTestCheck, executeTool } = require("../dist/services/sandbox/tools");
 const { json, runRecordedTool } = require("../dist/services/sandbox/toolRunner");
 const { fsRepoFiles, isTestFile, resolveToolchain } = require("../dist/services/toolchain");
 
@@ -369,4 +369,17 @@ test("a passing run does not open the gate; skip_reproduction does, with its rea
   assert.equal(skipped.status, "COMPLETED");
   assert.equal(ctx.reproduction.skipped, "Only the README changes.");
   assert.equal((await run(ctx, "edit_file", { path: "src/dup.js", oldText: "x = 1;\nx = 1;", newText: "x = 1;" })).status, "COMPLETED");
+});
+
+test("the command whose failure showed the problem becomes a check verification runs again", async (t) => {
+  const { ctx } = workspace(t, { reproduction: { shown: false, newTest: false } });
+  ctx.runCommand = async () => ({ exitCode: 1, timedOut: false, output: "1 failing" });
+  await run(ctx, "edit_file", { path: "tests/add.test.js", oldText: "", newText: "assert(add(1, 2) === 3)\n" });
+  await run(ctx, "run_command", { command: "exit 3" });
+  assert.equal(ctx.reproduction.command, "exit 3");
+  assert.deepEqual(agentTestCheck(ctx.reproduction), { name: "agent's test (exit 3)", command: ["sh", "-c", "exit 3"] });
+  // A later failure does not replace it, and a problem shown by a check (which verification runs anyway) adds none.
+  await run(ctx, "run_command", { command: "exit 4" });
+  assert.equal(ctx.reproduction.command, "exit 3");
+  assert.equal(agentTestCheck({}), undefined);
 });

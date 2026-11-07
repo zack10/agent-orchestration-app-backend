@@ -13,7 +13,7 @@ export const EXECUTION_PROMPTS = {
   agent: "agent.v6",
   analyze: "analyze.v2",
   review: "review.v6",
-  reviewer: "reviewer.v5",
+  reviewer: "reviewer.v6",
   discover: "discover.v3",
   fileFormat: "file-format.v1",
 } as const;

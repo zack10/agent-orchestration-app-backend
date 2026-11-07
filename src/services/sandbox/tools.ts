@@ -60,7 +60,20 @@ export interface Reproduction {
   newTest: boolean;
   /** The agent's reason for not showing the problem with a test. */
   skipped?: string;
+  /** The run_command command whose failure showed the problem; verification runs it again. */
+  command?: string;
 }
+
+/**
+ * The command that showed the problem, as a check verification runs after
+ * the repository's own: the agent's new test must pass on the final change.
+ * Without it a new test file that no check runs (jq-2821, run 7) passes as
+ * "verified". None when the problem was shown by a check, which runs anyway.
+ */
+export const agentTestCheck = (reproduction: Pick<Reproduction, "command">) =>
+  reproduction.command
+    ? { name: `agent's test (${reproduction.command.slice(0, 200)})`, command: ["sh", "-c", reproduction.command] }
+    : undefined;
 
 /**
  * How the problem was shown, for the reviewer. run_command can change files
@@ -486,11 +499,12 @@ const editFile = (ctx: ToolContext, args: z.infer<typeof ARGS.edit_file>) => {
 };
 
 /** A failing run after a new test was written opens the gate; says so in the output. A timeout shows nothing. */
-const noteReproduction = (ctx: ToolContext, result: SandboxResult) => {
+const noteReproduction = (ctx: ToolContext, result: SandboxResult, command?: string) => {
   if (ctx.reproduction.shown || !ctx.reproduction.newTest || result.exitCode === 0) return "";
   if (result.timedOut)
     return "\n[A run that times out shows nothing about the ticket: your test probably hangs, for example on a server, connection or timer it leaves open. Make the test finish, then run it again.]";
   ctx.reproduction.shown = true;
+  if (command) ctx.reproduction.command = command;
   return "\n[The failing test shows the problem; you can now change the code. Make sure it fails for the reason the ticket describes, then fix the wrong value where it comes from, not only in the code your test calls.]";
 };
 
@@ -517,7 +531,7 @@ const verdict = (result: SandboxResult, timeoutMs: number) =>
 const runCommand = async (ctx: ToolContext, args: z.infer<typeof ARGS.run_command>) => {
   const timeoutMs = (args.timeoutSeconds ?? CHECK_TIMEOUT_MS / 1000) * 1000;
   const result = await ctx.runCommand(args.command, timeoutMs);
-  const note = noteReproduction(ctx, result);
+  const note = noteReproduction(ctx, result, args.command);
   return completed(cap(ctx, `$ ${args.command}\n${verdict(result, timeoutMs)}\n${result.output.trim()}`, "ends") + note);
 };
 
