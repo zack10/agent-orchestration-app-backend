@@ -280,6 +280,28 @@ Fixed before Phase 0 of `docs/plans/AGENTIC_ROADMAP.md`, because each would skew
 - [x] Exponential backoff on 429/503/529 in `LLMService` (honours `Retry-After`, fails fast on exhausted credits or long quota waits). Timeouts are not retried.
 - [ ] Per-user tokens or an actor bound to the token; record the real approver.
 
+### - [x] M13 — Labelling one Trello card re-ran every labelled card
+**Status:** DONE · **Fix ref:** 2026-11-02
+**Where:** `src/integrations/trelloAdapter.ts` (`revisionHash`)
+**Found:** a reference eval on a fresh database: the revision hash included whole label objects, whose `uses` count changes on every card when any card gets or loses the label, so each new labelled card gave every other labelled card a new idempotency key and a new execution (triage, plan, ticket comments).
+**Fix:**
+- [x] Hash only each label's `id` and `name` (labels with only a name hash as before). Existing labelled cards get one new execution after the change.
+
+### - [x] M14 — One run's cache cleanup destroyed another run's environment snapshot
+**Status:** DONE · **Fix ref:** 2026-11-05
+**Where:** `src/services/workspaceService.ts` (`storeEnvironmentCache`)
+**Found:** a reference eval with two runs in parallel (fd, Rust): 3 of 4 runs failed with `No such image: agent-env-<id>:latest` right after a ~10-minute setup and redid it from scratch. On Docker's containerd image store, `docker image prune` breaks any `docker commit` in progress, whatever its `--filter label=` (reproduced with plain docker: 2 of 2 commits failed with a prune loop beside them, 0 of 2 with images removed by ID). Each run pruned its repository's dangling caches after committing, so it hit the other run's commit.
+**Fix:**
+- [x] List the repository's dangling cache images and `docker rmi` each by ID instead of pruning. Test: a new cache replaces the old one and leaves nothing dangling.
+
+### - [ ] M15 — A worker that lost its run lease keeps running the execution
+**Status:** OPEN · **Found:** 2026-11-06
+**Where:** run lease and recovery sweep (`executionWorker` / `executionService`), `setupWorkspace`
+**Found:** the jq reference eval ([report](docs/testing/reference-2026-11-06.md)) while the laptop went into Modern Standby for 5 hours: leases expired, the sweep handed the runs out again, and the original workers woke up and carried on. Two setups of the same execution then raced: one's `removeEnvironmentSnapshot` removed the other's setup container mid-commit ("You cannot commit container ... which is being removed", "failed to apply diff: snapshot ... does not exist").
+**Fix:**
+- [ ] A worker checks it still holds the lease (heartbeat result) before each graph node and before Docker steps that create or remove the execution's containers and images, and stops if it lost it.
+- [ ] Test: a run whose lease was taken over stops without touching the new owner's containers.
+
 ---
 
 ## Low
