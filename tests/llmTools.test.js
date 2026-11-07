@@ -163,7 +163,7 @@ test("OpenAI-compatible chat completions: tool_calls round trip", async (t) => {
   ]);
 });
 
-test("OpenAI Responses API: function_call round trip, with reasoning items replayed unchanged", { todo: "Responses API provider code (roadmap limitation 24)" }, async (t) => {
+test("OpenAI Responses API: function_call round trip, with reasoning items replayed unchanged", async (t) => {
   const reasoning = { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "enc-789" };
   const call = { type: "function_call", id: "fc_1", call_id: "call_7", name: "read_file", arguments: '{"path":"src/a.js"}' };
   const bodies = scripted(t, [
@@ -193,7 +193,7 @@ test("OpenAI Responses API: function_call round trip, with reasoning items repla
   ]);
 });
 
-test("OpenAI Responses API: a turn from another provider is sent as plain items; incomplete replies raise", { todo: "Responses API provider code (roadmap limitation 24)" }, async (t) => {
+test("OpenAI Responses API: a turn from another provider is sent as plain items; incomplete replies raise", async (t) => {
   const bodies = scripted(t, [
     { status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] },
     { status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [] },

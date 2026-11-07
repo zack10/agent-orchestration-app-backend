@@ -29,8 +29,12 @@ const profileSchema = z
     supportsTools: z.boolean().default(false),
     // Only list models whose id starts with one of these (e.g. hide embeddings).
     modelPrefixes: z.array(z.string().min(1)).optional(),
+    // Endpoint for tool calls; only OpenAI itself is known to need "responses".
+    toolsApi: z.enum(["chat", "responses"]).default("chat"),
   })
   .strict();
+
+const TOOLS_APIS = ["chat", "responses"] as const;
 
 export type ProviderProfileInput = z.input<typeof profileSchema>;
 
@@ -66,6 +70,10 @@ export const parseProviderProfiles = (
   env: NodeJS.ProcessEnv,
   nodeEnv: string,
 ): OpenAICompatibleProfile[] => {
+  // OpenAI's newest models reject tools with reasoning on chat completions (roadmap limitation 24).
+  const openaiToolsApi = env.OPENAI_TOOLS_API?.trim() || "responses";
+  if (!TOOLS_APIS.includes(openaiToolsApi as (typeof TOOLS_APIS)[number]))
+    throw new Error(`OPENAI_TOOLS_API must be "chat" or "responses", got "${openaiToolsApi}"`);
   const builtIn: OpenAICompatibleProfile = {
     key: "openai",
     label: "OpenAI",
@@ -73,6 +81,7 @@ export const parseProviderProfiles = (
     apiKey: env.OPENAI_API_KEY ?? "",
     supportsTools: true,
     modelPrefixes: ["gpt-", "o1", "o3", "o4", "chatgpt-"],
+    toolsApi: openaiToolsApi as OpenAICompatibleProfile["toolsApi"],
   };
   if (!raw?.trim()) return [builtIn];
 
@@ -104,6 +113,7 @@ export const parseProviderProfiles = (
         apiKey: profile.apiKeyEnv ? (env[profile.apiKeyEnv] ?? "") : "",
         supportsTools: profile.supportsTools,
         modelPrefixes: profile.modelPrefixes,
+        toolsApi: profile.toolsApi,
       };
     }),
   ];

@@ -137,7 +137,7 @@ test("agent config.reasoningEffort accepts known call kinds and levels only", ()
   assert.equal(createAgentSchema.safeParse(body({ triag: "low" })).success, false, "a typo is refused, not ignored");
 });
 
-test("the built-in OpenAI profile calls tools through the Responses API unless OPENAI_TOOLS_API says chat", { todo: "Responses API provider code (roadmap limitation 24)" }, () => {
+test("the built-in OpenAI profile calls tools through the Responses API unless OPENAI_TOOLS_API says chat", () => {
   assert.equal(parseProviderProfiles("", {}, "development")[0].toolsApi, "responses");
   assert.equal(parseProviderProfiles("", { OPENAI_TOOLS_API: "chat" }, "development")[0].toolsApi, "chat");
   assert.throws(() => parseProviderProfiles("", { OPENAI_TOOLS_API: "soap" }, "development"), /OPENAI_TOOLS_API/);
