@@ -1,4 +1,4 @@
-# AGENTS.md - Agent Orchestration Backend
+# AGENTS.md - Tickwright
 
 ## Dev Commands
 

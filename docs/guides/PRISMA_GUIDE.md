@@ -1,6 +1,6 @@
-# Prisma Usage Guide - Agent Orchestration Backend
+# Prisma Usage Guide - Tickwright
 
-This guide explains how to use Prisma to manage the database for your Agent Orchestration application.
+This guide explains how to use Prisma to manage the database for Tickwright.
 
 ---
 
