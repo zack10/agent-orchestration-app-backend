@@ -30,7 +30,7 @@ npm run build && node --test tests/llmUtils.test.js
 
 New test files must be added to the explicit list in the `test` script in `package.json`. There is no Jest.
 
-A change to a prompt or to the agent's code (plan step, run graph, tools, reviewer) is committed only after `npm run eval:coding -- --runs 3 --parallel 4` (about 40 min, $1.20 on `gpt-5-mini`; paid, so ask first) shows no drop in pass rate and no new wrong fixes against the last recorded x3 run. Never draw a conclusion from 1 to 3 runs of one scenario; use at least 10. Infrastructure, eval and docs changes are exempt.
+A change to a prompt or to the agent's code (plan step, run graph, tools, reviewer) is committed only after `npm run eval:coding -- --runs 3 --parallel 4` (about 25 min, $0.45 on `gpt-5.6-luna`, the model in `.env.e2e`; paid, so ask first) shows no drop in pass rate and no new wrong fixes against the last recorded x3 run. Never draw a conclusion from 1 to 3 runs of one scenario; use at least 10. Infrastructure, eval and docs changes are exempt.
 
 `tests/e2e/` is separate: those suites call the HTTP API (and Trello/GitHub for setup and cleanup) instead of `dist/`, are not part of `npm test`, and skip themselves when their `E2E_*` variables are unset. Add new e2e files to the `test:e2e` script. Shared pipeline helpers (fixtures, Trello/GitHub, waiting on executions) are in `tests/e2e/pipeline.js`.
 
