@@ -80,7 +80,7 @@ app.use("/api/llm", llmRoutes);
 app.use("/api", executionRoutes);
 
 app.get("/", (_req: Request, res: Response) => {
-  res.send("Agent Orchestration API is running");
+  res.send("Tickwright API is running");
 });
 
 app.use(errorHandler);

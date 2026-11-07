@@ -1,4 +1,4 @@
-# Agent Orchestration App Project Plan
+# Tickwright Project Plan
 
 ## Overview
 An interactive application to manage AI agents, assign them skills, enable MCP resource access, and facilitate inter-agent communication. MVP goal: role-based agents (frontend/backend/qa) pull work items from an external board (start with Trello polling; later Jira) and transition tickets through `TODO → IN_PROGRESS → READY_FOR_TEST → DONE`, coordinating via explicit API contract proposals/acceptance.
